@@ -31,3 +31,6 @@ htmlcov/
 # dotenv
 .env
 .env.*
+
+# Project data
+data/
