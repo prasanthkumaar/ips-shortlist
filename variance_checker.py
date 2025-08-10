@@ -1,214 +1,349 @@
-import argparse
 import csv
-import json
-import os
 from collections import Counter, defaultdict
-from typing import Dict, List, Tuple
-
-from matching_utils import (
-    load_targets,
-    normalize_participants,
-    Stratum,
-    read_csv_dicts,
-    STATUS_REGISTERED,
-)
+from typing import Dict, Tuple, List, Any, Optional
+from datetime import datetime, date
 
 
-def compute_group_memberships(participants):
-    g_members = {"1": [], "2": []}
-    for i, p in enumerate(participants):
-        if p.group in {"1", "2"}:
-            g_members[p.group].append(i)
-    return g_members
+def proportionize(counter: Dict[Any, int]) -> Dict[Any, float]:
+    total = sum(counter.values())
+    if total <= 0:
+        return {k: 0.0 for k in counter.keys()}
+    return {k: v / total for k, v in counter.items()}
 
 
-def proportion_table(counts: Counter) -> Dict[str, float]:
-    total = sum(counts.values())
-    if total == 0:
-        return {k: 0.0 for k in counts}
-    return {k: v / total for k, v in counts.items()}
+def load_targets(targets_csv_path: str) -> Tuple[Dict[Tuple[str, str, str, str], int], List[str]]:
+    counts: Dict[Tuple[str, str, str, str], int] = {}
+    age_groups_order: List[str] = []
+    with open(targets_csv_path, 'r', newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            age_group = row['age_group'].strip()
+            sex = row['sex'].strip()
+            race = row['race'].strip()
+            edu = row['education_level'].strip()
+            cnt = int(row['count'])
+            key = (sex, age_group, race, edu)
+            counts[key] = counts.get(key, 0) + cnt
+            if age_group not in age_groups_order:
+                age_groups_order.append(age_group)
+    return counts, age_groups_order
 
 
-def observed_marginals(participants, indices: List[int]) -> Dict[str, Counter]:
-    counts = {
-        "sex": Counter(),
-        "age_group": Counter(),
-        "race": Counter(),
-        "education_level": Counter(),
+def compute_marginal_targets(target_counts: Dict[Tuple[str, str, str, str], int]):
+    sex_c = Counter()
+    age_c = Counter()
+    race_c = Counter()
+    edu_c = Counter()
+    for (sex, age, race, edu), cnt in target_counts.items():
+        sex_c[sex] += cnt
+        age_c[age] += cnt
+        race_c[race] += cnt
+        edu_c[edu] += cnt
+    return (
+        proportionize(sex_c),
+        proportionize(age_c),
+        proportionize(race_c),
+        proportionize(edu_c),
+    )
+
+
+def normalize_header_name(header: str) -> str:
+    return ''.join(ch.lower() for ch in header if ch.isalnum())
+
+
+def best_header_match(headers: List[str], candidates: List[str]) -> Optional[str]:
+    norm_headers = {normalize_header_name(h): h for h in headers}
+    norm_candidates = [normalize_header_name(c) for c in candidates]
+    for nc in norm_candidates:
+        if nc in norm_headers:
+            return norm_headers[nc]
+    for nh_key, orig in norm_headers.items():
+        for nc in norm_candidates:
+            if nh_key.startswith(nc) or nc in nh_key:
+                return orig
+    return None
+
+
+def detect_columns(headers: List[str]) -> Dict[str, Optional[str]]:
+    synonyms = {
+        'sex': ['sex', 'gender'],
+        'race': ['race', 'ethnicity'],
+        'education_level': ['education', 'highesteducation', 'edu'],
+        'dob': ['dob', 'dateofbirth', 'dateofbirthfull', 'birthdate', 'birth'],
+        'status': ['status'],
+        'group': ['group'],
     }
-    for idx in indices:
-        p = participants[idx]
-        counts["sex"][p.sex] += 1
-        counts["age_group"][p.age_group] += 1
-        counts["race"][p.race] += 1
-        counts["education_level"][p.education_level] += 1
-    return counts
+    mapping: Dict[str, Optional[str]] = {}
+    for key, cands in synonyms.items():
+        mapping[key] = best_header_match(headers, cands)
+    return mapping
 
 
-def write_variance_csv(path: str, headers: List[str], rows: List[List]):
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(headers)
-        for r in rows:
-            w.writerow(r)
+# Date parsing and age bucketing
+
+def parse_date_maybe(value: str) -> Optional[date]:
+    if not value:
+        return None
+    value = value.strip()
+    fmts = [
+        '%d-%b-%Y', '%d-%b-%y', '%d/%m/%Y', '%d/%m/%y',
+        '%Y-%m-%d', '%d-%m-%Y', '%d-%m-%y', '%m/%d/%Y', '%m/%d/%y'
+    ]
+    for fmt in fmts:
+        try:
+            dt = datetime.strptime(value, fmt).date()
+            if dt > date.today():
+                try:
+                    dt = dt.replace(year=dt.year - 100)
+                except ValueError:
+                    pass
+            return dt
+        except Exception:
+            continue
+    try:
+        parts = value.replace(',', ' ').replace('.', ' ').split()
+        if len(parts) == 3:
+            day = int(parts[0])
+            mon_str = parts[1][:3].title()
+            year = int(parts[2])
+            if year < 100:
+                year += 2000 if year <= 24 else 1900
+            dt = datetime.strptime(f"{day}-{mon_str}-{year}", '%d-%b-%Y').date()
+            if dt > date.today():
+                dt = dt.replace(year=dt.year - 100)
+            return dt
+    except Exception:
+        pass
+    return None
+
+
+def compute_age(birth_date: date, on_date: Optional[date] = None) -> int:
+    if on_date is None:
+        on_date = date.today()
+    years = on_date.year - birth_date.year
+    if (on_date.month, on_date.day) < (birth_date.month, birth_date.day):
+        years -= 1
+    return years
+
+
+def parse_age_group_label(label: str) -> Tuple[int, Optional[int]]:
+    label = label.strip()
+    if '+' in label:
+        floor = int(label.replace('+', '').strip())
+        return floor, None
+    if '-' in label:
+        a, b = label.split('-', 1)
+        return int(a.strip()), int(b.strip())
+    raise ValueError(f"Unrecognized age_group label: {label}")
+
+
+def make_age_bucketer(age_groups_order: List[str]):
+    parsed = []
+    for lbl in age_groups_order:
+        lo, hi = parse_age_group_label(lbl)
+        parsed.append((lbl, lo, hi))
+
+    def bucket(age: int) -> Optional[str]:
+        if age < 0:
+            return None
+        for lbl, lo, hi in parsed:
+            if hi is None:
+                if age >= lo:
+                    return lbl
+            else:
+                if lo <= age <= hi:
+                    return lbl
+        return None
+
+    return bucket
+
+
+def report_for_group(rows: List[Dict[str, Any]], target_marginals) -> str:
+    sex_t, age_t, race_t, edu_t = target_marginals
+    sex_obs = Counter()
+    age_obs = Counter()
+    race_obs = Counter()
+    edu_obs = Counter()
+
+    def norm_value(val: str) -> str:
+        return (val or '').strip()
+
+    for r in rows:
+        sex_obs[norm_value(r['__norm_sex'])] += 1
+        age_obs[norm_value(r['__norm_age_group'])] += 1
+        race_obs[norm_value(r['__norm_race'])] += 1
+        edu_obs[norm_value(r['__norm_education_level'])] += 1
+
+    sex_p = proportionize(sex_obs)
+    age_p = proportionize(age_obs)
+    race_p = proportionize(race_obs)
+    edu_p = proportionize(edu_obs)
+
+    def variance_table(obs_p: Dict[str, float], tgt_p: Dict[str, float]) -> List[Tuple[str, float, float, float]]:
+        cats = set(obs_p.keys()) | set(tgt_p.keys())
+        rows = []
+        for c in sorted(cats):
+            o = obs_p.get(c, 0.0)
+            t = tgt_p.get(c, 0.0)
+            diff = o - t
+            rows.append((c, o, t, diff))
+        return rows
+
+    def mad(obs_p: Dict[str, float], tgt_p: Dict[str, float]) -> float:
+        cats = set(obs_p.keys()) | set(tgt_p.keys())
+        return sum(abs(obs_p.get(c, 0.0) - tgt_p.get(c, 0.0)) for c in cats) / max(len(cats), 1)
+
+    def format_section(title: str, table: List[Tuple[str, float, float, float]]) -> str:
+        lines = [f"{title} (category | observed% | target% | diff%)"]
+        for cat, o, t, d in sorted(table, key=lambda x: x[3]):
+            lines.append(f"  - {cat}: {o:.3f} | {t:.3f} | {d:+.3f}")
+        return '\n'.join(lines)
+
+    sex_tbl = variance_table(sex_p, sex_t)
+    age_tbl = variance_table(age_p, age_t)
+    race_tbl = variance_table(race_p, race_t)
+    edu_tbl = variance_table(edu_p, edu_t)
+
+    # Overall single-number score (lower is better)
+    overall_mad = (mad(sex_p, sex_t) + mad(age_p, age_t) + mad(race_p, race_t) + mad(edu_p, edu_t)) / 4.0
+
+    # Top under/over represented across all dimensions
+    all_rows = []
+    for title, tbl in [('Sex', sex_tbl), ('Age', age_tbl), ('Race', race_tbl), ('Education', edu_tbl)]:
+        for cat, o, t, d in tbl:
+            all_rows.append((f"{title}:{cat}", o, t, d))
+
+    under = sorted(all_rows, key=lambda x: x[3])[:10]
+    over = sorted(all_rows, key=lambda x: x[3], reverse=True)[:10]
+
+    lines: List[str] = []
+    lines.append(f"Overall variance (mean absolute deviation across marginals, lower is better): {overall_mad*100:.2f}%")
+    lines.append('')
+    lines.append(format_section('Sex', sex_tbl))
+    lines.append('')
+    lines.append(format_section('Age Group', age_tbl))
+    lines.append('')
+    lines.append(format_section('Race', race_tbl))
+    lines.append('')
+    lines.append(format_section('Education Level', edu_tbl))
+    lines.append('')
+    lines.append('Top under-represented (most negative diff%):')
+    for label, o, t, d in under:
+        lines.append(f"  - {label}: {o:.3f} | {t:.3f} | {d:+.3f}")
+    lines.append('Top over-represented (most positive diff%):')
+    for label, o, t, d in over:
+        lines.append(f"  - {label}: {o:.3f} | {t:.3f} | {d:+.3f}")
+
+    return '\n'.join(lines)
+
+
+def normalize_race(value: str) -> Optional[str]:
+    if not value:
+        return None
+    v = value.strip().lower()
+    if 'chinese' in v:
+        return 'Chinese'
+    if 'malay' in v:
+        return 'Malay'
+    if 'indian' in v or 'sikh' in v or 'tamil' in v:
+        return 'Indian'
+    return 'Others'
+
+
+def normalize_sex(value: str) -> Optional[str]:
+    if not value:
+        return None
+    v = value.strip().lower()
+    if v in {'m', 'male'}:
+        return 'Male'
+    if v in {'f', 'female'}:
+        return 'Female'
+    return None
+
+
+def normalize_education(value: Optional[str]) -> str:
+    if not value:
+        return 'no_info'
+    v = value.strip().lower()
+    if v in {'below secondary', 'belowsecondary', 'primary', 'psle'}:
+        return 'Below Secondary'
+    if v in {'secondary', 'o level', 'olevel', 'n level', 'nlevel'}:
+        return 'Secondary'
+    if 'post' in v and 'secondary' in v:
+        return 'Post Secondary (Non-Tertiary)'
+    if 'diploma' in v or 'professional' in v:
+        return 'Diploma & Professional Qualification'
+    if 'university' in v or 'degree' in v or 'bachelor' in v or 'masters' in v or 'phd' in v:
+        return 'University'
+    return 'no_info'
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Compute variance vs targets for shortlisting groups")
-    parser.add_argument("--participants", required=True, help="Path to updated or source participants CSV")
-    parser.add_argument("--targets", required=True, help="Path to targets CSV")
-    parser.add_argument("--selection-json", help="Optional JSON with group1_indices and group2_indices from shortlist dry-run")
-    parser.add_argument("--outdir", help="Output directory for variance CSVs (used only with --save)")
-    parser.add_argument("--save", action="store_true", help="Also save variance CSVs (default: print only)")
-    parser.add_argument("--top-k", type=int, default=5, help="Number of most under-represented categories to highlight (default 5)")
-    parser.add_argument("--strata-top-k", type=int, default=10, help="Number of most under-represented full strata to highlight (default 10)")
-
+    import argparse
+    parser = argparse.ArgumentParser(description='Compute variance report against targets per group.')
+    parser.add_argument('--participants', '-p', type=str, required=True, help='Path to updated participants CSV.')
+    parser.add_argument('--targets', '-t', type=str, required=True, help='Path to targets CSV.')
+    parser.add_argument('--group-size', type=int, default=100, help='Expected group size (for sanity checks).')
     args = parser.parse_args()
 
-    targets = load_targets(args.targets)
-    rows = read_csv_dicts(args.participants)
-    if not rows:
-        raise SystemExit("Participants CSV is empty")
+    targets, age_groups_order = load_targets(args.targets)
+    target_marginals = compute_marginal_targets(targets)
+    age_bucket = make_age_bucketer(age_groups_order)
+    eighteen_to_twentyfour_labels = {lbl for lbl in age_groups_order if ('18-19' in lbl or '20-24' in lbl)}
 
-    participants, mapping = normalize_participants(rows, targets)
+    with open(args.participants, 'r', newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        headers = reader.fieldnames or []
+        colmap = detect_columns(headers)
+        rows = list(reader)
 
-    if args.selection_json:
-        with open(args.selection_json, "r", encoding="utf-8") as f:
-            sel = json.load(f)
-        groups = {
-            "1": sel.get("group1_indices", []),
-            "2": sel.get("group2_indices", []),
+    # Determine group column
+    gcol = colmap['group'] or 'Group'
+    scol = colmap['status'] or 'Status'
+
+    # Include rows with Status in {'TO_CONTACT', 'CONFIRMED'}
+    def norm_row(r: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        status = (r.get(scol, '') or '').strip().upper()
+        if status not in {'TO_CONTACT', 'CONFIRMED'}:
+            return None
+        sex = normalize_sex(r.get(colmap['sex'] or '', ''))
+        race = normalize_race(r.get(colmap['race'] or '', ''))
+        edu = normalize_education(r.get(colmap['education_level'] or '', ''))
+        dob_raw = r.get(colmap['dob'] or '', '')
+        dob = parse_date_maybe(dob_raw) if dob_raw else None
+        if not dob:
+            return None
+        age = compute_age(dob)
+        if age < 18:
+            return None
+        age_group = age_bucket(age)
+        if not age_group:
+            return None
+        if age_group in eighteen_to_twentyfour_labels:
+            edu = 'no_info'
+        try:
+            grp = int((r.get(gcol, '') or '').strip())
+        except Exception:
+            return None
+        return {
+            '__norm_sex': sex or 'Male',
+            '__norm_race': race or 'Others',
+            '__norm_education_level': edu,
+            '__norm_age_group': age_group,
+            '__group': grp,
         }
-    else:
-        groups = compute_group_memberships(participants)
 
-    outdir = args.outdir or os.path.dirname(os.path.abspath(args.participants))
-    if args.save:
-        os.makedirs(outdir, exist_ok=True)
+    normalized = [nr for nr in (norm_row(r) for r in rows) if nr]
 
-    # Precompute supply of available REGISTERED adults by stratum for guidance
-    supply_by_stratum: Dict[Stratum, int] = Counter()
-    for p in participants:
-        if p.eligible and p.status == STATUS_REGISTERED:
-            st = Stratum(p.sex, p.age_group, p.race, p.education_level)
-            supply_by_stratum[st] += 1
+    by_group: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    for r in normalized:
+        by_group[r['__group']].append(r)
 
-    for g in ["1", "2"]:
-        indices = groups.get(g, [])
-        if not indices:
-            print(f"Group {g}: no members found")
-            continue
-        n = len(indices)
-        obs = observed_marginals(participants, indices)
-
-        print(f"Group {g}: N={n}")
-        # For each dimension, build variance table
-        overall_mad_sum = 0.0
-        overall_mad_dims = 0
-        dim_scores = {}
-        for dim in ["sex", "age_group", "race", "education_level"]:
-            tgt_prop = targets.marginals_prop.get(dim, {})
-            obs_prop = proportion_table(obs[dim])
-            if dim == "education_level":
-                cats = [c for c in sorted(tgt_prop.keys()) if c != "no_info"]
-            else:
-                cats = sorted(set(tgt_prop.keys()) | set(obs_prop.keys()))
-            rows_out: List[List] = []
-            sum_abs = 0.0
-            # Renormalize when excluding no_info
-            if dim == "education_level":
-                obs_den = sum(obs_prop.get(c, 0.0) for c in cats) or 1.0
-                tgt_den = sum(tgt_prop.get(c, 0.0) for c in cats) or 1.0
-            else:
-                obs_den = 1.0
-                tgt_den = 1.0
-            for c in cats:
-                o = (obs_prop.get(c, 0.0) / obs_den)
-                t = (tgt_prop.get(c, 0.0) / tgt_den)
-                diff = o - t
-                sum_abs += abs(diff)
-                rows_out.append([c, round(t * 100, 3), round(o * 100, 3), round(diff * 100, 3), round(abs(diff) * 100, 3)])
-            mad = sum_abs / max(1, len(cats))
-            tvd = 0.5 * sum_abs
-            overall_mad_sum += mad
-            overall_mad_dims += 1
-            dim_scores[dim] = (mad, tvd)
-
-            print(f"  {dim}: MAD={mad:.4f}, TVD={tvd:.4f}")
-            print("    category | target_% | observed_% | diff_% | abs_diff_%")
-            for row in rows_out:
-                print(f"    {row[0]} | {row[1]} | {row[2]} | {row[3]} | {row[4]}")
-
-            if args.save:
-                csv_path = os.path.join(outdir, f"variance_group{g}_{dim}.csv")
-                write_variance_csv(csv_path, ["category", "target_%", "observed_%", "diff_%", "abs_diff_%"], rows_out)
-                print(f"    saved: {csv_path}")
-
-        overall_mad = overall_mad_sum / max(1, overall_mad_dims)
-        print(f"  overall MAD={overall_mad:.4f} (~{overall_mad*100:.2f}%)")
-
-        # Top under/over across all categories combined
-        diffs: List[Tuple[str, str, float]] = []  # (dim, cat, diff)
-        for dim in ["sex", "age_group", "race", "education_level"]:
-            tgt_prop = targets.marginals_prop.get(dim, {})
-            obs_prop = proportion_table(obs[dim])
-            if dim == "education_level":
-                cats = [c for c in sorted(tgt_prop.keys()) if c != "no_info"]
-                obs_den = sum(obs_prop.get(c, 0.0) for c in cats) or 1.0
-                tgt_den = sum(tgt_prop.get(c, 0.0) for c in cats) or 1.0
-            else:
-                cats = sorted(set(tgt_prop.keys()) | set(obs_prop.keys()))
-                obs_den = 1.0
-                tgt_den = 1.0
-            for c in cats:
-                diffs.append((dim, c, (obs_prop.get(c, 0.0) / obs_den) - (tgt_prop.get(c, 0.0) / tgt_den)))
-        diffs.sort(key=lambda x: x[2])
-        under = diffs[: args.top_k]
-        over = diffs[-args.top_k :][::-1]
-        print("  Top under-represented:")
-        for dim, cat, d in under:
-            print(f"    {dim}={cat}: {d*100:.2f}% (~{-d*n:.0f} ppl)")
-        print("  Top over-represented:")
-        for dim, cat, d in over:
-            print(f"    {dim}={cat}: {d*100:.2f}% (~{d*n:.0f} ppl)")
-
-        # Summary block
-        print("  Summary:")
-        for dim in ["sex", "age_group", "race", "education_level"]:
-            mad, tvd = dim_scores[dim]
-            print(f"    {dim}: MAD={mad:.4f}, TVD={tvd:.4f}")
-        print(f"    overall MAD={overall_mad:.4f} (~{overall_mad*100:.2f}%)")
-        print("  Focus next picks on (under-represented):")
-        for dim, cat, d in under:
-            print(f"    {dim}={cat} (deficit {abs(d)*100:.2f}% ~ {abs(d)*n:.0f} ppl)")
-
-        # Full strata guidance (education excludes no_info implicitly via supply and obs)
-        obs_counts_stratum: Dict[Stratum, int] = Counter()
-        for idx in indices:
-            p = participants[idx]
-            st = Stratum(p.sex, p.age_group, p.race, p.education_level)
-            obs_counts_stratum[st] += 1
-        obs_prop_stratum = {st: c / n for st, c in obs_counts_stratum.items()}
-
-        strata_diffs: List[Tuple[Stratum, float]] = []  # (stratum, diff)
-        for st, tprop in targets.by_stratum_prop.items():
-            if st.education_level == "no_info":
-                continue
-            oprop = obs_prop_stratum.get(st, 0.0)
-            diff = oprop - tprop
-            strata_diffs.append((st, diff))
-        strata_diffs.sort(key=lambda x: x[1])
-
-        print("  Focus by strata (full combination):")
-        count = 0
-        for st, diff in strata_diffs:
-            if diff < 0 and count < args.strata_top_k:
-                deficit_pct = -diff * 100.0
-                deficit_ppl = max(0, round(-diff * n))
-                supply = supply_by_stratum.get(st, 0)
-                print(f"    sex={st.sex} | age_group={st.age_group} | race={st.race} | education={st.education_level} -> deficit {deficit_pct:.2f}% ~ {deficit_ppl} ppl (available REGISTERED: {supply})")
-                count += 1
+    for g in sorted(by_group.keys()):
+        print(f"===== Group {g} (n={len(by_group[g])}) =====")
+        print(report_for_group(by_group[g], target_marginals))
+        print()
 
 
-if __name__ == "__main__":
-    main() 
+if __name__ == '__main__':
+    main()

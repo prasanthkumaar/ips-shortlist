@@ -1,542 +1,613 @@
-import argparse
-import json
+import csv
+import sys
 import os
 import random
-from collections import defaultdict, Counter
-from datetime import datetime
-from typing import Dict, List, Tuple, Any
+from collections import Counter, defaultdict
+from datetime import datetime, date
+from typing import Dict, List, Tuple, Optional, Any, Set
 
-from matching_utils import (
-    Stratum,
-    Targets,
-    load_targets,
-    normalize_participants,
-    allocate_largest_remainder,
-    read_csv_dicts,
-    write_csv_dicts,
-    STATUS_CONFIRMED,
-    STATUS_TO_CONTACT,
-    STATUS_REGISTERED,
-)
+# ==========================
+# Configuration
+# ==========================
+DEFAULT_SEED = 42
+NEW_PICKS_PER_GROUP = 100
+GROUPS = [1, 2]
+BALANCE_LAMBDA = 0.5
+SWAP_TRIES_PER_ITER = 20
+MAX_SWAP_ITERS = 500
 
+# ==========================
+# Utilities: string and header normalization
+# ==========================
 
-def stratum_of(sex: str, age_group: str, race: str, edu: str) -> Stratum:
-    return Stratum(sex=sex, age_group=age_group, race=race, education_level=edu)
-
-
-def compute_adjusted_desired_per_stratum(
-    targets: Targets,
-    group_size: int,
-    pre_counts: Dict[Stratum, int],
-) -> Dict[Stratum, float]:
-    # initial desired = max(0, target_prop * group_size - pre_counts)
-    desired_raw: Dict[Stratum, float] = {}
-    total_pos = 0.0
-    for st, prop in targets.by_stratum_prop.items():
-        want = max(0.0, prop * group_size - pre_counts.get(st, 0))
-        desired_raw[st] = want
-        total_pos += want
-    if total_pos <= 0:
-        # fallback to plain target proportions
-        return {st: targets.by_stratum_prop[st] * group_size for st in targets.by_stratum_prop}
-    scale = group_size / total_pos
-    return {st: desired_raw[st] * scale for st in desired_raw}
+def normalize_header_name(header: str) -> str:
+    return ''.join(ch.lower() for ch in header if ch.isalnum())
 
 
-def allocate_with_spill(
-    desired: Dict[Stratum, float],
-    caps: Dict[Stratum, int],
-    total_to_assign: int,
-    rng: random.Random,
-) -> Dict[Stratum, int]:
-    alloc = allocate_largest_remainder(desired, total_to_assign, caps)
-    assigned = sum(alloc.values())
-    # Fill leftovers to strata with capacity proportionally to target desire among available
-    while assigned < total_to_assign:
-        candidates = [(st, max(0, caps.get(st, 0) - alloc.get(st, 0)), desired.get(st, 0.0)) for st in desired]
-        candidates = [(st, cap_left, want) for st, cap_left, want in candidates if cap_left > 0]
-        if not candidates:
-            break
-        total_weight = sum(want for _, _, want in candidates)
-        if total_weight <= 0:
-            # distribute uniformly
-            candidates.sort(key=lambda x: (x[1]), reverse=True)
-            st = candidates[0][0]
-            alloc[st] = alloc.get(st, 0) + 1
-            assigned += 1
+def best_header_match(headers: List[str], candidates: List[str]) -> Optional[str]:
+    norm_headers = {normalize_header_name(h): h for h in headers}
+    norm_candidates = [normalize_header_name(c) for c in candidates]
+    # Exact normalized match
+    for nc in norm_candidates:
+        if nc in norm_headers:
+            return norm_headers[nc]
+    # Startswith/contains fallbacks
+    for nh_key, orig in norm_headers.items():
+        for nc in norm_candidates:
+            if nh_key.startswith(nc) or nc in nh_key:
+                return orig
+    return None
+
+
+def detect_columns(headers: List[str]) -> Dict[str, Optional[str]]:
+    # Synonyms by desired key
+    synonyms = {
+        'sex': ['sex', 'gender'],
+        'race': ['race', 'ethnicity'],
+        'education_level': ['education', 'highesteducation', 'edu'],
+        'dob': ['dob', 'dateofbirth', 'dateofbirthfull', 'birthdate', 'birth'],
+        'status': ['status'],
+        'group': ['group'],
+        'name': ['name', 'fullname'],
+        'email': ['email'],
+        'phone': ['phone', 'contact', 'number', 'mobile']
+    }
+    mapping: Dict[str, Optional[str]] = {}
+    for key, cands in synonyms.items():
+        mapping[key] = best_header_match(headers, cands)
+    return mapping
+
+# ==========================
+# Value normalization
+# ==========================
+
+def normalize_sex(value: str) -> Optional[str]:
+    if not value:
+        return None
+    v = value.strip().lower()
+    if v in {'m', 'male'}:
+        return 'Male'
+    if v in {'f', 'female'}:
+        return 'Female'
+    # If other values, return None to skip (targets only have Male/Female)
+    return None
+
+
+def normalize_race(value: str) -> Optional[str]:
+    if not value:
+        return None
+    v = value.strip().lower()
+    if 'chinese' in v:
+        return 'Chinese'
+    if 'malay' in v:
+        return 'Malay'
+    # Treat Indian and Sikh under Indian
+    if 'indian' in v or 'sikh' in v or 'tamil' in v:
+        return 'Indian'
+    # Everything else → Others
+    return 'Others'
+
+
+def normalize_education(value: Optional[str]) -> str:
+    if not value:
+        return 'no_info'
+    v = value.strip().lower()
+    if v in {'below secondary', 'belowsecondary', 'primary', 'psle'}:
+        return 'Below Secondary'
+    if v in {'secondary', 'o level', 'olevel', 'n level', 'nlevel'}:
+        return 'Secondary'
+    if 'post' in v and 'secondary' in v:
+        return 'Post Secondary (Non-Tertiary)'
+    if 'diploma' in v or 'professional' in v:
+        return 'Diploma & Professional Qualification'
+    if 'university' in v or 'degree' in v or 'bachelor' in v or 'masters' in v or 'phd' in v:
+        return 'University'
+    # Any unknown → no_info
+    return 'no_info'
+
+# ==========================
+# Dates and ages
+# ==========================
+
+def parse_date_maybe(value: str) -> Optional[date]:
+    if not value:
+        return None
+    value = value.strip()
+    # Try multiple formats
+    fmts = [
+        '%d-%b-%Y', '%d-%b-%y', '%d/%m/%Y', '%d/%m/%y',
+        '%Y-%m-%d', '%d-%m-%Y', '%d-%m-%y', '%m/%d/%Y', '%m/%d/%y'
+    ]
+    for fmt in fmts:
+        try:
+            dt = datetime.strptime(value, fmt).date()
+            # two-digit year handling when using %y
+            # strptime already handles 00-68 as 2000-2068 and 69-99 as 1969-1999 in some implementations
+            # To be safe, if date is in the future by > 1 day, subtract 100 years
+            if dt > date.today():
+                try:
+                    dt = dt.replace(year=dt.year - 100)
+                except ValueError:
+                    pass
+            return dt
+        except Exception:
             continue
-        # pick one by probability proportional to remaining desired
-        r = rng.random() * total_weight
-        cum = 0.0
-        chosen = candidates[0][0]
-        for st, cap_left, want in candidates:
-            cum += want
-            if r <= cum:
-                chosen = st
-                break
-        alloc[chosen] = alloc.get(chosen, 0) + 1
-        assigned += 1
-    return alloc
+    # As a last resort, try day-monthname-yy with varied cases
+    try:
+        parts = value.replace(',', ' ').replace('.', ' ').split()
+        if len(parts) == 3:
+            day = int(parts[0])
+            mon_str = parts[1][:3].title()
+            year = int(parts[2])
+            if year < 100:
+                year += 2000 if year <= 24 else 1900
+            dt = datetime.strptime(f"{day}-{mon_str}-{year}", '%d-%b-%Y').date()
+            if dt > date.today():
+                dt = dt.replace(year=dt.year - 100)
+            return dt
+    except Exception:
+        pass
+    return None
 
 
-def build_pools(participants, targets: Targets):
-    # Pool of eligible REGISTERED by stratum
-    pool: Dict[Stratum, List[int]] = defaultdict(list)
-    for idx, p in enumerate(participants):
-        if p.eligible:
-            st = stratum_of(p.sex, p.age_group, p.race, p.education_level)
-            pool[st].append(idx)
-    return pool
+def compute_age(birth_date: date, on_date: Optional[date] = None) -> int:
+    if on_date is None:
+        on_date = date.today()
+    years = on_date.year - birth_date.year
+    if (on_date.month, on_date.day) < (birth_date.month, birth_date.day):
+        years -= 1
+    return years
+
+# ==========================
+# Targets handling
+# ==========================
+
+def load_targets(targets_csv_path: str) -> Tuple[List[str], Set[Tuple[str, str, str, str]], Dict[Tuple[str, str, str, str], int]]:
+    # Returns: (age_groups list), (valid 4D keys), (counts per 4D key)
+    counts: Dict[Tuple[str, str, str, str], int] = {}
+    age_groups_order: List[str] = []
+    valid_keys: Set[Tuple[str, str, str, str]] = set()
+
+    with open(targets_csv_path, 'r', newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            age_group = row['age_group'].strip()
+            sex = row['sex'].strip()
+            race = row['race'].strip()
+            edu = row['education_level'].strip()
+            cnt = int(row['count'])
+            key = (sex, age_group, race, edu)
+            counts[key] = counts.get(key, 0) + cnt
+            valid_keys.add(key)
+            if age_group not in age_groups_order:
+                age_groups_order.append(age_group)
+
+    return age_groups_order, valid_keys, counts
 
 
-def preaccount_counts(participants, group_label: str, targets: Targets) -> Tuple[Dict[Stratum, int], Dict[str, Counter]]:
-    # per stratum and per-dimension marginals for statuses locked in this group
-    per_stratum: Dict[Stratum, int] = defaultdict(int)
-    marginals: Dict[str, Counter] = {dim: Counter() for dim in ["sex", "age_group", "race", "education_level"]}
-    for p in participants:
-        if p.group == group_label and p.sex and p.age_group and p.status in {STATUS_CONFIRMED, STATUS_TO_CONTACT}:
-            st = stratum_of(p.sex, p.age_group, p.race, p.education_level)
-            per_stratum[st] += 1
-            marginals["sex"][p.sex] += 1
-            marginals["age_group"][p.age_group] += 1
-            marginals["race"][p.race] += 1
-            marginals["education_level"][p.education_level] += 1
-    return per_stratum, marginals
+def parse_age_group_label(label: str) -> Tuple[int, Optional[int]]:
+    label = label.strip()
+    if '+' in label:
+        floor = int(label.replace('+', '').strip())
+        return floor, None
+    if '-' in label:
+        a, b = label.split('-', 1)
+        return int(a.strip()), int(b.strip())
+    raise ValueError(f"Unrecognized age_group label: {label}")
 
 
-def compute_adjusted_dim_targets(targets: Targets, group_size: int, pre_dim_counts: Dict[str, Counter]) -> Dict[str, Dict[str, float]]:
-    # For each dimension, get desired counts for NEW PICKS after subtracting pre-existing, then scale to sum group_size
-    result: Dict[str, Dict[str, float]] = {}
-    for dim, target_prop in targets.marginals_prop.items():
-        desired = {cat: max(0.0, target_prop.get(cat, 0.0) * group_size - pre_dim_counts.get(dim, Counter()).get(cat, 0)) for cat in target_prop}
-        total_pos = sum(desired.values())
-        if total_pos <= 0:
-            # fallback to plain, proportionally
-            desired = {cat: target_prop.get(cat, 0.0) * group_size for cat in target_prop}
-            total_pos = sum(desired.values())
-        scale = group_size / total_pos if total_pos > 0 else 0.0
-        result[dim] = {cat: desired[cat] * scale for cat in desired}
-    return result
+def make_age_bucketer(age_groups_order: List[str]):
+    parsed = []
+    for lbl in age_groups_order:
+        lo, hi = parse_age_group_label(lbl)
+        parsed.append((lbl, lo, hi))
+
+    def bucket(age: int) -> Optional[str]:
+        if age < 0:
+            return None
+        for lbl, lo, hi in parsed:
+            if hi is None:
+                if age >= lo:
+                    return lbl
+            else:
+                if lo <= age <= hi:
+                    return lbl
+        return None
+
+    return bucket
+
+# ==========================
+# Selection helpers
+# ==========================
+
+def proportionize(counter: Dict[Any, int]) -> Dict[Any, float]:
+    total = sum(counter.values())
+    if total <= 0:
+        return {k: 0.0 for k in counter.keys()}
+    return {k: v / total for k, v in counter.items()}
 
 
-def select_from_pools(
-    pools: Dict[Stratum, List[int]],
-    alloc: Dict[Stratum, int],
-    rng: random.Random,
-) -> List[int]:
-    chosen: List[int] = []
-    for st, k in alloc.items():
-        if k <= 0:
-            continue
-        candidates = pools.get(st, [])
-        rng.shuffle(candidates)
-        picked = candidates[:k]
-        pools[st] = candidates[k:]
-        chosen.extend(picked)
-    return chosen
+def compute_marginal_targets(target_counts: Dict[Tuple[str, str, str, str], int]):
+    sex_c = Counter()
+    age_c = Counter()
+    race_c = Counter()
+    edu_c = Counter()
+    for (sex, age, race, edu), cnt in target_counts.items():
+        sex_c[sex] += cnt
+        age_c[age] += cnt
+        race_c[race] += cnt
+        edu_c[edu] += cnt
+    return (
+        proportionize(sex_c),
+        proportionize(age_c),
+        proportionize(race_c),
+        proportionize(edu_c),
+    )
 
 
-def group_dim_counts(participants, indices: List[int]) -> Dict[str, Counter]:
-    counts: Dict[str, Counter] = {dim: Counter() for dim in ["sex", "age_group", "race", "education_level"]}
-    for idx in indices:
-        p = participants[idx]
-        counts["sex"][p.sex] += 1
-        counts["age_group"][p.age_group] += 1
-        counts["race"][p.race] += 1
-        counts["education_level"][p.education_level] += 1
-    return counts
+def mean_abs_dev_over_marginals(group_items: List[Tuple[str, str, str, str]], target_marginals):
+    sex_t, age_t, race_t, edu_t = target_marginals
+    sex_obs = Counter()
+    age_obs = Counter()
+    race_obs = Counter()
+    edu_obs = Counter()
+    for sex, age, race, edu in group_items:
+        sex_obs[sex] += 1
+        age_obs[age] += 1
+        race_obs[race] += 1
+        edu_obs[edu] += 1
+    sex_p = proportionize(sex_obs)
+    age_p = proportionize(age_obs)
+    race_p = proportionize(race_obs)
+    edu_p = proportionize(edu_obs)
+    def mad(obs_p: Dict[str, float], tgt_p: Dict[str, float]) -> float:
+        cats = set(obs_p.keys()) | set(tgt_p.keys())
+        return sum(abs(obs_p.get(c, 0.0) - tgt_p.get(c, 0.0)) for c in cats) / max(len(cats), 1)
+    return (mad(sex_p, sex_t) + mad(age_p, age_t) + mad(race_p, race_t) + mad(edu_p, edu_t)) / 4.0
 
 
-def score_mad(dim_counts: Dict[str, Counter], dim_targets: Dict[str, Dict[str, float]], n: int) -> float:
-    total = 0.0
-    for dim, target in dim_targets.items():
-        cats = list(target.keys())
-        if not cats:
-            continue
-        mad = 0.0
-        for cat in cats:
-            obs = dim_counts.get(dim, Counter()).get(cat, 0) / max(1, n)
-            tgt = target.get(cat, 0.0) / max(1, n)
-            mad += abs(obs - tgt)
-        mad /= len(cats)
-        total += mad
-    return total
+# ==========================
+# Main selection pipeline
+# ==========================
+
+def load_participants(csv_path: str) -> Tuple[List[Dict[str, Any]], Dict[str, Optional[str]]]:
+    with open(csv_path, 'r', newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        headers = reader.fieldnames or []
+    colmap = detect_columns(headers)
+    return rows, colmap
 
 
-def greedy_swap(
-    participants,
-    picks_g1: List[int],
-    picks_g2: List[int],
-    dim_targets_g1: Dict[str, Dict[str, float]],
-    dim_targets_g2: Dict[str, Dict[str, float]],
-    rng: random.Random,
-    max_iter: int = 2000,
-) -> Tuple[List[int], List[int]]:
-    n1, n2 = len(picks_g1), len(picks_g2)
-    counts1 = group_dim_counts(participants, picks_g1)
-    counts2 = group_dim_counts(participants, picks_g2)
-    best1 = score_mad(counts1, dim_targets_g1, n1)
-    best2 = score_mad(counts2, dim_targets_g2, n2)
-    best = best1 + best2
+def normalize_row(row: Dict[str, Any], colmap: Dict[str, Optional[str]], age_bucket, eighteen_to_twentyfour_labels: Set[str]) -> Optional[Dict[str, Any]]:
+    # Only keep rows that can be normalized
+    status_val = row.get(colmap['status'], '') if colmap['status'] else ''
+    status = (status_val or '').strip().upper()
 
-    for _ in range(max_iter):
-        if not picks_g1 or not picks_g2:
-            break
-        i = rng.randrange(len(picks_g1))
-        j = rng.randrange(len(picks_g2))
-        a = picks_g1[i]
-        b = picks_g2[j]
-        pa = participants[a]
-        pb = participants[b]
-        # simulate swap
-        for dim, get_val in [
-            ("sex", lambda p: p.sex),
-            ("age_group", lambda p: p.age_group),
-            ("race", lambda p: p.race),
-            ("education_level", lambda p: p.education_level),
-        ]:
-            counts1[dim][get_val(pa)] -= 1
-            counts1[dim][get_val(pb)] += 1
-            counts2[dim][get_val(pb)] -= 1
-            counts2[dim][get_val(pa)] += 1
-        new_score = score_mad(counts1, dim_targets_g1, n1) + score_mad(counts2, dim_targets_g2, n2)
-        if new_score < best:
-            best = new_score
-            picks_g1[i], picks_g2[j] = b, a
-        else:
-            # revert
-            for dim, get_val in [
-                ("sex", lambda p: p.sex),
-                ("age_group", lambda p: p.age_group),
-                ("race", lambda p: p.race),
-                ("education_level", lambda p: p.education_level),
-            ]:
-                counts1[dim][get_val(pa)] += 1
-                counts1[dim][get_val(pb)] -= 1
-                counts2[dim][get_val(pb)] += 1
-                counts2[dim][get_val(pa)] -= 1
-    return picks_g1, picks_g2
+    dob_raw = row.get(colmap['dob'], '') if colmap['dob'] else ''
+    dob = parse_date_maybe(dob_raw) if dob_raw else None
+    if not dob:
+        return None
+    age = compute_age(dob)
+    if age < 18:
+        return None
+    age_group = age_bucket(age)
+    if not age_group:
+        return None
+
+    sex_val = row.get(colmap['sex'], '') if colmap['sex'] else ''
+    sex = normalize_sex(sex_val)
+    if not sex:
+        return None
+
+    race_val = row.get(colmap['race'], '') if colmap['race'] else ''
+    race = normalize_race(race_val)
+    if not race:
+        return None
+
+    edu_val = row.get(colmap['education_level'], '') if colmap['education_level'] else ''
+    edu_norm = normalize_education(edu_val)
+
+    # Additional note: for 18-24, force education to no_info
+    if age_group in eighteen_to_twentyfour_labels:
+        edu_norm = 'no_info'
+
+    # Keep original for writing back
+    norm = dict(row)
+    norm['__norm_sex'] = sex
+    norm['__norm_race'] = race
+    norm['__norm_education_level'] = edu_norm
+    norm['__norm_age_group'] = age_group
+    norm['__norm_status'] = status
+    return norm
 
 
-def ensure_status_group_headers(fieldnames: List[str], mapping: Dict[str, str]) -> List[str]:
-    out = list(fieldnames)
-    status_col = mapping.get("status", "Status")
-    group_col = mapping.get("group", "Group")
-    if status_col not in out:
-        out.append(status_col)
-    if group_col not in out:
-        out.append(group_col)
-    return out
-
-# ------------------- Race-first allocation helpers -------------------
-
-def allocate_float_keys_with_caps(desired: Dict[str, float], caps: Dict[str, int], total_to_assign: int, rng: random.Random) -> Dict[str, int]:
-    # floor then largest remainder with caps
-    keys = list(desired.keys())
-    base = {k: min(int(desired.get(k, 0.0)), max(0, caps.get(k, 0))) for k in keys}
-    assigned = sum(base.values())
-    rema = []
-    for k in keys:
-        rem = max(0.0, desired.get(k, 0.0) - base[k]) if caps.get(k, 0) > base[k] else 0.0
-        rema.append((rem, k))
-    remaining = max(0, total_to_assign - assigned)
-    rema.sort(key=lambda t: (t[0], t[1]), reverse=True)
-    i = 0
-    while remaining > 0 and i < len(rema):
-        rem, k = rema[i]
-        if base[k] < caps.get(k, 0):
-            base[k] += 1
-            remaining -= 1
-        i += 1
-        if i >= len(rema):
-            i = 0
+def build_target_quota(target_counts: Dict[Tuple[str, str, str, str], int], total_needed: int) -> Dict[Tuple[str, str, str, str], int]:
+    total_pop = sum(target_counts.values())
+    if total_pop <= 0:
+        return defaultdict(int)
+    # Floating desired counts
+    desired_float = {k: (v / total_pop) * total_needed for k, v in target_counts.items()}
+    # Round using largest remainder method
+    base = {k: int(v) for k, v in desired_float.items()}
+    remainder = {k: desired_float[k] - base[k] for k in desired_float}
+    remaining = total_needed - sum(base.values())
+    # Assign remaining to keys with largest remainders
+    for k, _ in sorted(remainder.items(), key=lambda kv: kv[1], reverse=True)[:max(0, remaining)]:
+        base[k] += 1
     return base
 
 
-def allocate_race_first(targets: Targets, group_size: int, pre_dim_counts: Dict[str, Counter], caps_by_stratum: Dict[Stratum, int], rng: random.Random) -> Dict[Stratum, int]:
-    # Desired per race after pre-account
-    tgt_race_prop = targets.marginals_prop["race"]
-    desired_race = {r: max(0.0, tgt_race_prop.get(r, 0.0) * group_size - pre_dim_counts.get("race", Counter()).get(r, 0)) for r in tgt_race_prop}
-    total_pos = sum(desired_race.values())
-    if total_pos <= 0:
-        desired_race = {r: tgt_race_prop.get(r, 0.0) * group_size for r in tgt_race_prop}
-        total_pos = sum(desired_race.values())
-    scale = group_size / total_pos if total_pos > 0 else 0.0
-    desired_race = {r: desired_race[r] * scale for r in desired_race}
+def shortlist(
+    participants_csv: str,
+    targets_csv: str,
+    seed: int = DEFAULT_SEED,
+    picks_per_group: int = NEW_PICKS_PER_GROUP,
+) -> str:
+    random.seed(seed)
 
-    # Caps per race from pools
-    caps_race: Dict[str, int] = {}
-    for st, cap in caps_by_stratum.items():
-        caps_race[st.race] = caps_race.get(st.race, 0) + cap
+    age_groups_order, valid_keys, target_counts = load_targets(targets_csv)
+    age_bucket = make_age_bucketer(age_groups_order)
+    eighteen_to_twentyfour_labels = {lbl for lbl in age_groups_order if ('18-19' in lbl or '20-24' in lbl)}
 
-    # Allocate counts to races with caps
-    race_counts = allocate_float_keys_with_caps(desired_race, caps_race, group_size, rng)
+    rows, colmap = load_participants(participants_csv)
 
-    # Within each race, allocate to strata proportional to target weights conditioned on race
-    # Compute conditional weights w_st = prop(st) / sum_{st in race} prop(st)
-    prop_by_race_sum: Dict[str, float] = {}
-    for st, prop in targets.by_stratum_prop.items():
-        prop_by_race_sum[st.race] = prop_by_race_sum.get(st.race, 0.0) + prop
+    # Normalize rows and separate by status
+    normalized_rows: List[Dict[str, Any]] = []
+    for row in rows:
+        norm = normalize_row(row, colmap, age_bucket, eighteen_to_twentyfour_labels)
+        if not norm:
+            continue
+        normalized_rows.append(norm)
 
-    alloc: Dict[Stratum, int] = {st: 0 for st in targets.by_stratum_prop}
-    for race, r_total in race_counts.items():
-        # Build desired within this race
-        desired_within: Dict[Stratum, float] = {}
-        caps_within: Dict[Stratum, int] = {}
-        denom = max(1e-9, prop_by_race_sum.get(race, 0.0))
-        for st, prop in targets.by_stratum_prop.items():
-            if st.race != race:
+    # Pre-account existing CONFIRMED and TO_CONTACT toward quotas
+    confirmed_or_pending: List[Dict[str, Any]] = [r for r in normalized_rows if r['__norm_status'] in {'CONFIRMED', 'TO_CONTACT'}]
+    existing_counts = Counter()
+    for r in confirmed_or_pending:
+        key = (r['__norm_sex'], r['__norm_age_group'], r['__norm_race'], r['__norm_education_level'])
+        # Only count if key exists in targets
+        if key in target_counts:
+            existing_counts[key] += 1
+
+    # Eligible pool is REGISTERED and not yet pending/confirmed
+    eligible: List[Dict[str, Any]] = [r for r in normalized_rows if r['__norm_status'] == 'REGISTERED']
+
+    # Per-group top-up: compute current group sizes and remaining capacity
+    group_header_in = colmap['group'] if colmap['group'] else 'Group'
+    existing_by_group_keys: Dict[int, List[Tuple[str, str, str, str]]] = {g: [] for g in GROUPS}
+    current_group_size: Dict[int, int] = {g: 0 for g in GROUPS}
+    for r in confirmed_or_pending:
+        key = (r['__norm_sex'], r['__norm_age_group'], r['__norm_race'], r['__norm_education_level'])
+        g_raw = r.get(group_header_in)
+        try:
+            g_val = int(str(g_raw).strip()) if g_raw is not None and str(g_raw).strip() != '' else None
+        except Exception:
+            g_val = None
+        if g_val in GROUPS:
+            existing_by_group_keys[g_val].append(key)
+            current_group_size[g_val] += 1
+
+    group_capacity_remaining: Dict[int, int] = {g: max(0, picks_per_group - current_group_size[g]) for g in GROUPS}
+    total_new_needed = sum(group_capacity_remaining.values())
+
+    # Build desired new quotas at 4D level accounting for existing locked/pending
+    desired_total_counts = build_target_quota(target_counts, total_new_needed + sum(existing_counts.values()))
+    # New picks quota = desired_total - existing
+    new_quota = {k: max(0, desired_total_counts.get(k, 0) - existing_counts.get(k, 0)) for k in target_counts.keys()}
+
+    # Greedy fill by exact 4D key
+    by_key_pool: Dict[Tuple[str, str, str, str], List[int]] = defaultdict(list)
+    for idx, r in enumerate(eligible):
+        key = (r['__norm_sex'], r['__norm_age_group'], r['__norm_race'], r['__norm_education_level'])
+        if key in target_counts:
+            by_key_pool[key].append(idx)
+
+    # Shuffle indices for reproducibility but random tie-breaking
+    for lst in by_key_pool.values():
+        random.shuffle(lst)
+
+    selected_indices: List[int] = []
+
+    # First pass: fill deficits by key
+    for key, deficit in sorted(new_quota.items(), key=lambda kv: kv[1], reverse=True):
+        if deficit <= 0:
+            continue
+        pool = by_key_pool.get(key, [])
+        take = min(deficit, len(pool))
+        selected_indices.extend(pool[:take])
+        by_key_pool[key] = pool[take:]
+
+    # If not enough, second pass: score by marginal improvement
+    if len(selected_indices) < total_new_needed:
+        # Build current observed counts (existing + selected so far)
+        current_counts = Counter(existing_counts)
+        for i in selected_indices:
+            r = eligible[i]
+            key = (r['__norm_sex'], r['__norm_age_group'], r['__norm_race'], r['__norm_education_level'])
+            current_counts[key] += 1
+
+        # Precompute marginals from targets
+        target_marginals = compute_marginal_targets(target_counts)
+
+        # Candidates not yet selected
+        selected_set = set(selected_indices)
+        remaining_indices = [i for i in range(len(eligible)) if i not in selected_set]
+
+        def candidate_score(idx: int) -> float:
+            r = eligible[idx]
+            key = (r['__norm_sex'], r['__norm_age_group'], r['__norm_race'], r['__norm_education_level'])
+            # Score higher if key is still under desired_total_counts vs current_counts
+            deficit_key = desired_total_counts.get(key, 0) - current_counts.get(key, 0)
+            sex, age, race, edu = key
+            s = 0.0
+            if deficit_key > 0:
+                s += 3.0
+            s += target_marginals[0].get(sex, 0) * 1.0
+            s += target_marginals[1].get(age, 0) * 1.0
+            s += target_marginals[2].get(race, 0) * 0.5
+            s += target_marginals[3].get(edu, 0) * 0.5
+            s += random.random() * 0.01
+            return s
+
+        remaining_indices.sort(key=candidate_score, reverse=True)
+        need = total_new_needed - len(selected_indices)
+        selected_indices.extend(remaining_indices[:need])
+
+    # Ensure exactly total_new_needed
+    selected_indices = selected_indices[:total_new_needed]
+    selected_rows = [eligible[i] for i in selected_indices]
+
+    # Assign to groups with balancing objective, seeding with existing compositions
+    target_marginals = compute_marginal_targets(target_counts)
+
+    fixed_allocations: Dict[int, List[Tuple[str, str, str, str]]] = {g: list(existing_by_group_keys[g]) for g in GROUPS}
+    var_keys: Dict[int, List[Tuple[str, str, str, str]]] = {g: [] for g in GROUPS}
+    var_rows_by_group: Dict[int, List[Dict[str, Any]]] = {g: [] for g in GROUPS}
+
+    def build_groups_items() -> Dict[int, List[Tuple[str, str, str, str]]]:
+        return {g: fixed_allocations[g] + var_keys[g] for g in GROUPS}
+
+    def group_mads(groups_items: Dict[int, List[Tuple[str, str, str, str]]]) -> Dict[int, float]:
+        return {g: mean_abs_dev_over_marginals(groups_items[g], target_marginals) for g in GROUPS}
+
+    def objective(groups_items: Dict[int, List[Tuple[str, str, str, str]]]) -> float:
+        m = group_mads(groups_items)
+        total = sum(m.values())
+        balance = abs(m.get(GROUPS[0], 0.0) - m.get(GROUPS[1], 0.0))
+        return total + BALANCE_LAMBDA * balance
+
+    capacity_remaining = dict(group_capacity_remaining)
+    random.shuffle(selected_rows)
+
+    for r in selected_rows:
+        key = (r['__norm_sex'], r['__norm_age_group'], r['__norm_race'], r['__norm_education_level'])
+        best_g = None
+        best_obj = float('inf')
+        base_groups = build_groups_items()
+        for g in GROUPS:
+            if capacity_remaining[g] <= 0:
                 continue
-            weight = prop / denom
-            desired_within[st] = weight * r_total
-            caps_within[st] = max(0, caps_by_stratum.get(st, 0))
-        # allocate within race
-        if desired_within:
-            alloc_within = allocate_largest_remainder(desired_within, r_total, caps_within)
-            for st, k in alloc_within.items():
-                alloc[st] = alloc.get(st, 0) + k
+            trial_groups = {gg: list(base_groups[gg]) for gg in GROUPS}
+            trial_groups[g].append(key)
+            obj = objective(trial_groups)
+            if obj < best_obj:
+                best_obj = obj
+                best_g = g
+        if best_g is None:
+            # Fallback to any group with capacity
+            candidates = [g for g in GROUPS if capacity_remaining[g] > 0]
+            best_g = candidates[0] if candidates else GROUPS[0]
+        var_keys[best_g].append(key)
+        var_rows_by_group[best_g].append(r)
+        r['__assigned_group'] = best_g
+        capacity_remaining[best_g] = max(0, capacity_remaining[best_g] - 1)
 
-    # If due to caps we under-allocated overall, spread remaining by global caps
-    assigned = sum(alloc.values())
-    if assigned < group_size:
-        # residual desired = targets.by_stratum_prop scaled to remaining
-        rem = group_size - assigned
-        desired_global = {st: targets.by_stratum_prop[st] * rem for st in targets.by_stratum_prop}
-        caps_left = {st: max(0, caps_by_stratum.get(st, 0) - alloc.get(st, 0)) for st in targets.by_stratum_prop}
-        add = allocate_largest_remainder(desired_global, rem, caps_left)
-        for st, k in add.items():
-            alloc[st] = alloc.get(st, 0) + k
+    # Swap pass over new picks only
+    def build_current_obj() -> float:
+        return objective(build_groups_items())
 
-    return alloc
+    current_obj = build_current_obj()
+    iters = 0
+    improved = True
+    while improved and iters < MAX_SWAP_ITERS:
+        iters += 1
+        improved = False
+        for _ in range(SWAP_TRIES_PER_ITER):
+            a_group, b_group = GROUPS
+            if not var_keys[a_group] or not var_keys[b_group]:
+                break
+            i = random.randrange(0, len(var_keys[a_group]))
+            j = random.randrange(0, len(var_keys[b_group]))
+            # Swap keys and rows
+            var_keys[a_group][i], var_keys[b_group][j] = var_keys[b_group][j], var_keys[a_group][i]
+            var_rows_by_group[a_group][i], var_rows_by_group[b_group][j] = var_rows_by_group[b_group][j], var_rows_by_group[a_group][i]
+            new_obj = build_current_obj()
+            if new_obj + 1e-9 < current_obj:
+                current_obj = new_obj
+                # Update assigned groups in rows
+                var_rows_by_group[a_group][i]['__assigned_group'] = a_group
+                var_rows_by_group[b_group][j]['__assigned_group'] = b_group
+                improved = True
+            else:
+                # Revert swap
+                var_keys[a_group][i], var_keys[b_group][j] = var_keys[b_group][j], var_keys[a_group][i]
+                var_rows_by_group[a_group][i], var_rows_by_group[b_group][j] = var_rows_by_group[b_group][j], var_rows_by_group[a_group][i]
+        # End tries loop
 
-# ---------------------------------------------------------------------
+    # Write updated CSV
+    updated_path = participants_csv.replace('.csv', '.updated.csv')
+
+    # Ensure Group and Status columns exist in output header
+    with open(participants_csv, 'r', newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        input_headers = reader.fieldnames or []
+
+    out_headers = list(input_headers)
+    if colmap['status'] is None:
+        out_headers.append('Status')
+        status_header = 'Status'
+    else:
+        status_header = colmap['status']
+    if colmap['group'] is None:
+        out_headers.append('Group')
+        group_header = 'Group'
+    else:
+        group_header = colmap['group']
+
+    # Build index mapping for writing
+    selected_row_ids = set()
+    # Use tuple of stable identifying fields; fallback to object id
+    def row_identity(r: Dict[str, Any]) -> Tuple:
+        return (
+            r.get(colmap.get('name') or '', ''),
+            r.get(colmap.get('email') or '', ''),
+            r.get(colmap.get('phone') or '', ''),
+            r.get(colmap.get('dob') or '', ''),
+        )
+
+    selected_id_to_group: Dict[Tuple, int] = {}
+    for r in selected_rows:
+        selected_row_ids.add(id(r))
+        selected_id_to_group[row_identity(r)] = r['__assigned_group']
+
+    # Now write rows, updating only newly selected REGISTERED rows
+    with open(participants_csv, 'r', newline='', encoding='utf-8') as f_in, open(updated_path, 'w', newline='', encoding='utf-8') as f_out:
+        reader = csv.DictReader(f_in)
+        writer = csv.DictWriter(f_out, fieldnames=out_headers)
+        writer.writeheader()
+        for raw in reader:
+            row_out = dict(raw)
+            # Normalize to check if this is a selected row
+            norm = normalize_row(raw, colmap, age_bucket, eighteen_to_twentyfour_labels)
+            if norm and norm['__norm_status'] == 'REGISTERED':
+                rid = row_identity(norm)
+                if rid in selected_id_to_group:
+                    row_out[status_header] = 'TO_CONTACT'
+                    row_out[group_header] = str(selected_id_to_group[rid])
+            writer.writerow(row_out)
+
+    return updated_path
+
 
 def main():
-    parser = argparse.ArgumentParser(description="Shortlist participants into 2 groups with demographic matching")
-    parser.add_argument("--participants", required=True, help="Path to participants CSV")
-    parser.add_argument("--targets", required=True, help="Path to targets CSV")
-    parser.add_argument("--group-size", type=int, default=100, help="New picks per group (default 100)")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--output", help="Updated participants CSV path (default: <input>.updated.csv)")
-    parser.add_argument("--log", help="JSON log output path (default: <input>.shortlist_log.json)")
-    parser.add_argument("--solver", choices=["baseline", "mip"], default="baseline", help="Use baseline greedy or MIP (optional)")
-    parser.add_argument("--dry-run", action="store_true", help="Do not write updated CSV/log; print summary and optionally save selection JSON")
-    parser.add_argument("--selection-out", help="If set in dry-run, write selected indices JSON here for external analysis")
-    parser.add_argument("--print-variance", action="store_true", help="In dry-run, also print variance summary for both groups")
-    parser.add_argument("--top-k", type=int, default=5, help="Top K under-represented categories to highlight (default 5)")
-
+    import argparse
+    parser = argparse.ArgumentParser(description='Shortlist participants into two groups while matching Singapore demographics.')
+    parser.add_argument('--participants', '-p', type=str, required=True, help='Path to participants CSV (source of truth).')
+    parser.add_argument('--targets', '-t', type=str, required=True, help='Path to targets CSV (ground truth counts).')
+    parser.add_argument('--seed', type=int, default=DEFAULT_SEED, help='Random seed for reproducibility.')
+    parser.add_argument('--per_group', type=int, default=NEW_PICKS_PER_GROUP, help='New picks per group.')
     args = parser.parse_args()
 
-    rng = random.Random(args.seed)
-
-    targets = load_targets(args.targets)
-
-    rows = read_csv_dicts(args.participants)
-    if not rows:
-        raise SystemExit("Participants CSV is empty")
-
-    participants, mapping = normalize_participants(rows, targets, seed=args.seed)
-
-    # Build pools and pre-account per group
-    pools = build_pools(participants, targets)
-
-    pre_g1_strata, pre_g1_dim = preaccount_counts(participants, "1", targets)
-    pre_g2_strata, pre_g2_dim = preaccount_counts(participants, "2", targets)
-
-    # Caps per stratum is total eligible in pool
-    caps: Dict[Stratum, int] = {st: len(pools.get(st, [])) for st in targets.by_stratum_prop.keys()}
-
-    # Race-first allocation per group
-    alloc_g1 = allocate_race_first(targets, args.group_size, pre_g1_dim, caps, rng)
-    if sum(alloc_g1.values()) < args.group_size:
-        # Fallback to global spill to fill remaining
-        rem = args.group_size - sum(alloc_g1.values())
-        desired_global = {st: targets.by_stratum_prop[st] * rem for st in targets.by_stratum_prop}
-        caps_left = {st: max(0, caps.get(st, 0) - alloc_g1.get(st, 0)) for st in targets.by_stratum_prop}
-        add = allocate_largest_remainder(desired_global, rem, caps_left)
-        for st, k in add.items():
-            alloc_g1[st] = alloc_g1.get(st, 0) + k
-    # Reduce caps by what was given to g1 to avoid duplicate picks
-    used_g1: Dict[Stratum, int] = defaultdict(int)
-    for st, k in alloc_g1.items():
-        used_g1[st] += k
-        caps[st] = max(0, caps.get(st, 0) - k)
-
-    alloc_g2 = allocate_race_first(targets, args.group_size, pre_g2_dim, caps, rng)
-    if sum(alloc_g2.values()) < args.group_size:
-        rem = args.group_size - sum(alloc_g2.values())
-        desired_global = {st: targets.by_stratum_prop[st] * rem for st in targets.by_stratum_prop}
-        caps_left = {st: max(0, caps.get(st, 0) - alloc_g2.get(st, 0)) for st in targets.by_stratum_prop}
-        add = allocate_largest_remainder(desired_global, rem, caps_left)
-        for st, k in add.items():
-            alloc_g2[st] = alloc_g2.get(st, 0) + k
-
-    if sum(alloc_g1.values()) < args.group_size or sum(alloc_g2.values()) < args.group_size:
-        raise SystemExit("Insufficient eligible REGISTERED candidates to fill both groups as requested.")
-
-    # Select specific participants
-    pools_for_g1 = {st: list(pools.get(st, [])) for st in pools}
-    picks_g1 = select_from_pools(pools_for_g1, alloc_g1, rng)
-
-    # Remove picked from original pools
-    selected_set = set(picks_g1)
-    for st in list(pools.keys()):
-        pools[st] = [idx for idx in pools[st] if idx not in selected_set]
-
-    picks_g2 = select_from_pools(pools, alloc_g2, rng)
-
-    # Greedy swap pass to reduce MAD vs adjusted marginals (based on NEW PICKS only)
-    dim_targets_g1 = compute_adjusted_dim_targets(targets, args.group_size, pre_g1_dim)
-    dim_targets_g2 = compute_adjusted_dim_targets(targets, args.group_size, pre_g2_dim)
-    picks_g1, picks_g2 = greedy_swap(participants, picks_g1, picks_g2, dim_targets_g1, dim_targets_g2, rng)
-
-    if args.dry_run:
-        # Print concise summary
-        print(f"Selected (dry-run): group1={len(picks_g1)}, group2={len(picks_g2)}")
-        if args.print_variance:
-            # Precompute supply of available REGISTERED adults by stratum for guidance
-            supply_by_stratum: Dict[Stratum, int] = Counter()
-            for p in participants:
-                if p.eligible and p.status == STATUS_REGISTERED:
-                    st = Stratum(p.sex, p.age_group, p.race, p.education_level)
-                    supply_by_stratum[st] += 1
-            # print variance directly
-            for g_label, picks, dim_targets in [("1", picks_g1, dim_targets_g1), ("2", picks_g2, dim_targets_g2)]:
-                n = len(picks)
-                obs = group_dim_counts(participants, picks)
-                print(f"Group {g_label}: N={n}")
-                overall_mad_sum = 0.0
-                overall_mad_dims = 0
-                dim_scores = {}
-                diffs_all = []
-                for dim in ["sex", "age_group", "race", "education_level"]:
-                    tgt_prop = targets.marginals_prop.get(dim, {})
-                    # convert counts to proportions
-                    if dim == "education_level":
-                        cats = [c for c in sorted(tgt_prop.keys()) if c != "no_info"]
-                    else:
-                        cats = sorted(tgt_prop.keys())
-                    sum_abs = 0.0
-                    print(f"  {dim}:")
-                    print("    category | target_% | observed_% | diff_% | abs_diff_%")
-                    # Denominators for renormalization
-                    if dim == "education_level":
-                        obs_den = sum((obs.get(dim, Counter()).get(c, 0) for c in cats))
-                        tgt_den = sum((tgt_prop.get(c, 0.0) for c in cats)) or 1.0
-                    else:
-                        obs_den = n
-                        tgt_den = 1.0
-                    for c in cats:
-                        o = (obs.get(dim, Counter()).get(c, 0) / max(1, obs_den)) * 100.0
-                        t = (tgt_prop.get(c, 0.0) / max(1e-12, tgt_den)) * 100.0
-                        diff = o - t
-                        diffs_all.append((dim, c, diff/100.0))
-                        sum_abs += abs(diff) / 100.0
-                        print(f"    {c} | {t:.3f} | {o:.3f} | {diff:.3f} | {abs(diff):.3f}")
-                    mad = sum_abs / max(1, len(cats))
-                    tvd = 0.5 * sum_abs
-                    dim_scores[dim] = (mad, tvd)
-                    overall_mad_sum += mad
-                    overall_mad_dims += 1
-                    print(f"    MAD={mad:.4f}, TVD={tvd:.4f}")
-                overall_mad = overall_mad_sum / max(1, overall_mad_dims)
-                print(f"  overall MAD={overall_mad:.4f} (~{overall_mad*100:.2f}%)")
-                # summary and focus
-                diffs_all.sort(key=lambda x: x[2])
-                under = diffs_all[: args.top_k]
-                over = diffs_all[-args.top_k :][::-1]
-                print("  Summary:")
-                for dim in ["sex", "age_group", "race", "education_level"]:
-                    mad, tvd = dim_scores[dim]
-                    print(f"    {dim}: MAD={mad:.4f}, TVD={tvd:.4f}")
-                print(f"    overall MAD={overall_mad:.4f} (~{overall_mad*100:.2f}%)")
-                print("  Focus next picks on (under-represented):")
-                for dim, cat, d in under:
-                    print(f"    {dim}={cat} (deficit {abs(d)*100:.2f}% ~ {abs(d)*n:.0f} ppl)")
-
-                # Full strata guidance
-                obs_counts_stratum: Dict[Stratum, int] = Counter()
-                for idx in picks:
-                    p = participants[idx]
-                    st = Stratum(p.sex, p.age_group, p.race, p.education_level)
-                    obs_counts_stratum[st] += 1
-                obs_prop_stratum = {st: c / n for st, c in obs_counts_stratum.items()}
-
-                strata_diffs: List[Tuple[Stratum, float]] = []
-                for st, tprop in targets.by_stratum_prop.items():
-                    oprop = obs_prop_stratum.get(st, 0.0)
-                    diff = oprop - tprop
-                    strata_diffs.append((st, diff))
-                strata_diffs.sort(key=lambda x: x[1])
-
-                print("  Focus by strata (full combination):")
-                count = 0
-                for st, diff in strata_diffs:
-                    if diff < 0 and count < args.top_k:
-                        deficit_pct = -diff * 100.0
-                        deficit_ppl = max(0, round(-diff * n))
-                        supply = supply_by_stratum.get(st, 0)
-                        print(f"    sex={st.sex} | age_group={st.age_group} | race={st.race} | education={st.education_level} -> deficit {deficit_pct:.2f}% ~ {deficit_ppl} ppl (available REGISTERED: {supply})")
-                        count += 1
-        # optional save selection
-        if args.selection_out:
-            sel = {"group1_indices": picks_g1, "group2_indices": picks_g2}
-            with open(args.selection_out, "w", encoding="utf-8") as f:
-                json.dump(sel, f)
-            print(f"Wrote selection JSON: {os.path.abspath(args.selection_out)}")
-        return
-
-    # Apply updates
-    status_col = mapping.get("status", "Status")
-    group_col = mapping.get("group", "Group")
-
-    updated_rows = list(rows)
-    for idx in picks_g1:
-        updated_rows[idx][status_col] = STATUS_TO_CONTACT
-        updated_rows[idx][group_col] = "1"
-    for idx in picks_g2:
-        updated_rows[idx][status_col] = STATUS_TO_CONTACT
-        updated_rows[idx][group_col] = "2"
-
-    # Write outputs
-    output_path = args.output or f"{os.path.splitext(args.participants)[0]}.updated.csv"
-    fieldnames = ensure_status_group_headers(list(rows[0].keys()), mapping)
-    write_csv_dicts(output_path, updated_rows, fieldnames)
-
-    # Log summary
-    def alloc_to_dict(alloc: Dict[Stratum, int]) -> Dict[str, int]:
-        return {f"{st.sex}|{st.age_group}|{st.race}|{st.education_level}": n for st, n in alloc.items() if n}
-
-    caps_dict = {f"{st.sex}|{st.age_group}|{st.race}|{st.education_level}": caps for st, caps in {**{st: len(build_pools(participants, targets).get(st, [])) for st in targets.by_stratum_prop},}.items()}
-
-    log = {
-        "timestamp": datetime.utcnow().isoformat() + "Z",
-        "seed": args.seed,
-        "group_size": args.group_size,
-        "participants_input": os.path.abspath(args.participants),
-        "targets_input": os.path.abspath(args.targets),
-        "selected": {
-            "group1": len(picks_g1),
-            "group2": len(picks_g2),
-        },
-        "allocations": {
-            "group1": alloc_to_dict(alloc_g1),
-            "group2": alloc_to_dict(alloc_g2),
-        },
-        "caps": caps_dict,
-        "preaccount_counts": {
-            "group1": {k: v for k, v in pre_g1_dim.items()},
-            "group2": {k: v for k, v in pre_g2_dim.items()},
-        },
-    }
-
-    log_path = args.log or f"{os.path.splitext(args.participants)[0]}.shortlist_log.json"
-    with open(log_path, "w", encoding="utf-8") as f:
-        json.dump(log, f, indent=2, default=lambda o: dict(o))
-
-    print(f"Wrote updated CSV: {output_path}")
-    print(f"Wrote log: {log_path}")
+    updated = shortlist(args.participants, args.targets, seed=args.seed, picks_per_group=args.per_group)
+    print(f'Updated CSV written to: {updated}')
+    # Also print a ready-to-run variance checker command (absolute paths)
+    shortlist_dir = os.path.dirname(os.path.abspath(__file__))
+    variance_path = os.path.join(shortlist_dir, 'variance_checker.py')
+    updated_abs = os.path.abspath(updated)
+    targets_abs = os.path.abspath(args.targets)
+    print('Run this to view variance per group:')
+    print(f'python3 {variance_path} --participants "{updated_abs}" --targets "{targets_abs}"')
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

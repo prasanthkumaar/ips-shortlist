@@ -1,125 +1,77 @@
-# IPS Shortlisting Toolkit
+# IPS Shortlist
 
-This repo shortlists participants into 2 groups of N each while matching Singapore’s demographics by sex, age_group, race, and education_level. It also prints detailed variance diagnostics to the terminal.
+This repo shortlists participants into two groups while matching Singapore demographics (sex, age_group, race, education_level), and reports variance to targets.
 
-## Quick start
+## Data files
 
-- Python 3.9+
-- Files:
-  - `data/GovernmentCallStudyAug2025_2025-08-09.csv` (participants)
-  - `final_2024_agegroup_sex_race_education.csv` (targets)
+- `final_2024_agegroup_sex_race_education.csv`: target counts with header `age_group,sex,race,education_level,count`
+- `data/GovernmentCallStudyAug2025_2025-08-09.csv`: source participants
 
-### Dry-run (console only, no file writes)
+## Global rules
 
-This selects 100 per group (default) and prints variance + focus guidance to the terminal. It does not modify your CSV.
+- Only shortlist participants aged ≥ 18 (DOB parsed; age_group is bucketed from targets’ labels)
+- Only shortlist rows where `Status == REGISTERED`
+- Pre-account existing rows:
+  - `Status == CONFIRMED` → locked-in toward quotas (kept in their `Group` if present)
+  - `Status == TO_CONTACT` → pending; excluded from new selection but counted toward current composition (by `Group` if present)
+- Special: education for 18–24 is set to `no_info`
 
-```bash
-python3 shortlist.py \
-  --participants data/GovernmentCallStudyAug2025_2025-08-09.csv \
-  --targets final_2024_agegroup_sex_race_education.csv \
-  --seed 123 \
-  --dry-run \
-  --print-variance \
-  --top-k 8
-```
+## Install
 
-What you’ll see per group (in the terminal):
+Python 3.9+ recommended.
 
-- Per-dimension tables (sex, age_group, race, education_level)
-  - target*% vs observed*% vs diff*% and abs_diff*%
-  - MAD, TVD per dimension
-- overall MAD (and as a percent)
-- Focus next picks on: top-K under-represented categories with approx headcount
-- Focus by strata (full combination sex×age_group×race×education) with deficits and available REGISTERED supply
+## Usage
 
-Notes:
-
-- Education `no_info` is treated as unknown (not a target bucket). Variance tables for education exclude `no_info` and renormalize the remaining categories.
-- Reproducible selection via `--seed`.
-
-### Write an updated CSV (optional)
-
-If you are satisfied with the dry-run, you can write the shortlist to a new CSV. By default, the original file is NOT overwritten.
+1. Shortlist (creates/overwrites updated CSV and prints variance command)
 
 ```bash
 python3 shortlist.py \
-  --participants data/GovernmentCallStudyAug2025_2025-08-09.csv \
-  --targets final_2024_agegroup_sex_race_education.csv \
-  --seed 123
+  --participants "/absolute/path/to/data/GovernmentCallStudyAug2025_2025-08-09.csv" \
+  --targets "/absolute/path/to/final_2024_agegroup_sex_race_education.csv" \
+  --seed 42 --per_group 100
 ```
 
-Outputs:
+- Output: `data/GovernmentCallStudyAug2025_2025-08-09.updated.csv`
+- The script prints a one-line command to run the variance report.
 
-- `data/GovernmentCallStudyAug2025_2025-08-09.updated.csv` (new picks have `Status=TO_CONTACT`, `Group=1/2`)
-- `data/GovernmentCallStudyAug2025_2025-08-09.shortlist_log.json` (allocation summary)
-
-Safety:
-
-- To overwrite the working file, pass `--output data/GovernmentCallStudyAug2025_2025-08-09.csv` (not recommended until you’ve reviewed a dry-run).
-
-### Variance checker (optional)
-
-You can run the checker against either:
-
-- An updated participants CSV (after running shortlist without `--dry-run`), or
-- The source CSV that already has `Group` assignments.
+2. Variance report (per group, with overall variance %; lower is better)
 
 ```bash
 python3 variance_checker.py \
-  --participants data/GovernmentCallStudyAug2025_2025-08-09.csv \
-  --targets final_2024_agegroup_sex_race_education.csv \
-  --top-k 5 \
-  --strata-top-k 10
+  --participants "/absolute/path/to/data/GovernmentCallStudyAug2025_2025-08-09.updated.csv" \
+  --targets "/absolute/path/to/final_2024_agegroup_sex_race_education.csv"
 ```
 
-It prints the same per-dimension variance tables (MAD/TVD), overall MAD%, single-dimension focus, and full strata focus with supply. Pass `--save` to also write CSVs (optional).
+## What the shortlist does
 
-## How to interpret the printouts
+- Fuzzy column detection for headers: sex, race, education_level, DOB, Status, Group
+- Value normalization for sex/race/education
+- Buckets ages using age group labels found in the targets CSV
+- Pre-accounts existing `CONFIRMED`/`TO_CONTACT`:
+  - Uses their existing `Group` (if present) to seed each group’s composition
+  - Excludes them from new picks
+- Computes per-group “top-up” needed (to reach `--per_group` each). If some participants later reject and statuses change, re-running the shortlist tops up from remaining `REGISTERED`.
+- Selects new participants from `REGISTERED`:
+  - First, fills 4D deficits (sex × age_group × race × education_level)
+  - Then, scores remaining candidates by marginal improvement vs targets
+- Assigns new picks to `Group` 1 or 2 to minimize overall variance and keep groups similar:
+  - Objective: sum of group variances plus a balance penalty between groups
+  - Performs a swap pass over new picks only to further lower and balance variance
+- Writes the updated CSV with `Status=TO_CONTACT` and `Group∈{1,2}` for new picks only
 
-- target\_%: Population share (from targets) for a category
-- observed\_%: Share in your selected group
-- diff\_% = observed − target (positive = over-represented; negative = under-represented)
-- abs*diff*%: magnitude of deviation
-- MAD (Mean Absolute Deviation): average abs(diff) across categories in a dimension (0 is perfect)
-- TVD (Total Variation Distance): 0.5 × sum abs(diff) in a dimension; with N=100, TVD×100 ≈ minimal people to reassign
-- overall MAD: average of the four dimension MADs; printed also as a percentage
-- Focus next picks on: prioritized under-represented categories (with approximate headcount deficits)
-- Focus by strata: prioritized under-represented full combinations sex×age_group×race×education with available REGISTERED supply in your pool
+## Re-running after updates (top-up)
 
-Education `no_info` handling:
+- If some `TO_CONTACT` are rejected and their status changes (e.g., removed or set not REGISTERED), simply re-run the shortlist command.
+- The script will recompute per-group deficits, pre-account current `CONFIRMED`/`TO_CONTACT` (with their groups), and top up from remaining `REGISTERED` while keeping variance low and similar across groups.
 
-- `no_info` is excluded from education variance and summary (renormalized over known educations). This treats missing education as unknown rather than a target bucket.
+## Notes
 
-## Rules and normalization
+- Random tie-breaks are seeded (`--seed`) for reproducibility.
+- If groups diverge in score, you can increase balancing by editing in `shortlist.py`:
+  - `BALANCE_LAMBDA` (default 0.5)
+  - `SWAP_TRIES_PER_ITER` and `MAX_SWAP_ITERS`
 
-- Eligibility: age ≥ 18, `Status=REGISTERED`
-- Pre-accounting: existing `Status=CONFIRMED` and `Status=TO_CONTACT` count towards quotas (by group)
-- Header fuzzy matching:
-  - sex: `Gender|Sex` → values normalized to Male|Female
-  - race: `Race|Ethnicity` → Chinese|Malay|Indian|Others
-  - education_level: `Education|Highest Education|Edu` → known labels; unknown→no_info (excluded from variance)
-  - dob: `DOB|DateOfBirth` → age bucketed by target age groups
-  - status: `Status`, group: `Group`
-- Date parsing: common formats (e.g. `dd-MMM-yy`, `dd-MMM-YYYY`, `YYYY-mm-dd`, etc.) with sensible century inference
-- Age groups: read from the targets file and used for bucketing
+## Outputs
 
-## Allocation and optimization
-
-- Race-first allocation with availability caps; then within-race proportional to target stratum weights
-- Fallback global spill to fill remaining if a race is supply-constrained
-- Greedy swap pass across groups to reduce overall MAD
-- Random tie-breaks seeded by `--seed`
-
-## Troubleshooting
-
-- “Insufficient eligible REGISTERED candidates…”: you don’t have enough supply in some strata; use the “Focus by strata” list and the supply counts to adjust recruiting or relax constraints
-- No file writes in dry-run: ensure you did not pass `--save` or omit `--dry-run`
-- Column detection: check your header names match the synonyms above, or tweak the input file
-
-## Reproducibility
-
-- Use `--seed` to get deterministic selections and stable variance printouts.
-
-## License
-
-Internal research tooling.
+- `*.updated.csv`: participants with new picks marked `TO_CONTACT` and assigned `Group` 1 or 2
+- Variance report: prints per-group proportions vs targets with overall variance (% MAD)
