@@ -65,17 +65,17 @@ def best_header_match(headers: List[str], candidates: List[str]) -> Optional[str
 
 
 def detect_columns(headers: List[str]) -> Dict[str, Optional[str]]:
-    synonyms = {
-        'sex': ['sex', 'gender'],
-        'race': ['race', 'ethnicity'],
-        'education_level': ['education', 'highesteducation', 'edu'],
-        'dob': ['dob', 'dateofbirth', 'dateofbirthfull', 'birthdate', 'birth'],
-        'status': ['status'],
-        'group': ['group'],
+    # Lock down to exact headers provided by the user
+    header_set = set(headers)
+    mapping: Dict[str, Optional[str]] = {
+        'sex': 'Gender' if 'Gender' in header_set else None,
+        'race': 'Race' if 'Race' in header_set else None,
+        'education_level': 'Education' if 'Education' in header_set else None,
+        'dob': 'DOB' if 'DOB' in header_set else None,
+        'status': 'Status' if 'Status' in header_set else None,
+        'group': 'Group' if 'Group' in header_set else None,
+        'os': 'OS' if 'OS' in header_set else None,
     }
-    mapping: Dict[str, Optional[str]] = {}
-    for key, cands in synonyms.items():
-        mapping[key] = best_header_match(headers, cands)
     return mapping
 
 
@@ -164,6 +164,7 @@ def report_for_group(rows: List[Dict[str, Any]], target_marginals) -> str:
     age_obs = Counter()
     race_obs = Counter()
     edu_obs = Counter()
+    os_obs = Counter()
 
     def norm_value(val: str) -> str:
         return (val or '').strip()
@@ -173,11 +174,13 @@ def report_for_group(rows: List[Dict[str, Any]], target_marginals) -> str:
         age_obs[norm_value(r['__norm_age_group'])] += 1
         race_obs[norm_value(r['__norm_race'])] += 1
         edu_obs[norm_value(r['__norm_education_level'])] += 1
+        os_obs[norm_value(r['__norm_os'])] += 1
 
     sex_p = proportionize(sex_obs)
     age_p = proportionize(age_obs)
     race_p = proportionize(race_obs)
     edu_p = proportionize(edu_obs)
+    os_p = proportionize(os_obs)
 
     def variance_table(obs_p: Dict[str, float], tgt_p: Dict[str, float]) -> List[Tuple[str, float, float, float]]:
         cats = set(obs_p.keys()) | set(tgt_p.keys())
@@ -204,10 +207,14 @@ def report_for_group(rows: List[Dict[str, Any]], target_marginals) -> str:
     race_tbl = variance_table(race_p, race_t)
     edu_tbl = variance_table(edu_p, edu_t)
 
-    # Overall single-number score (lower is better)
+    # OS targets per user's requirement
+    os_target = {'iOS': 0.3, 'Android': 0.7}
+    os_tbl = variance_table(os_p, os_target)
+
+    # Overall single-number score (lower is better) across four original dimensions
     overall_mad = (mad(sex_p, sex_t) + mad(age_p, age_t) + mad(race_p, race_t) + mad(edu_p, edu_t)) / 4.0
 
-    # Top under/over represented across all dimensions
+    # Top under/over represented across all original dimensions
     all_rows = []
     for title, tbl in [('Sex', sex_tbl), ('Age', age_tbl), ('Race', race_tbl), ('Education', edu_tbl)]:
         for cat, o, t, d in tbl:
@@ -226,6 +233,9 @@ def report_for_group(rows: List[Dict[str, Any]], target_marginals) -> str:
     lines.append(format_section('Race', race_tbl))
     lines.append('')
     lines.append(format_section('Education Level', edu_tbl))
+    lines.append('')
+    # New Device OS section
+    lines.append(format_section('Device OS', os_tbl))
     lines.append('')
     lines.append('Top under-represented (most negative diff%):')
     for label, o, t, d in under:
@@ -278,9 +288,20 @@ def normalize_education(value: Optional[str]) -> str:
     return 'no_info'
 
 
+def normalize_os(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    v = value.strip().lower()
+    if 'apple' in v or v == 'ios':
+        return 'iOS'
+    if 'android' in v or any(b in v for b in ['samsung', 'google', 'oppo', 'xiaomi', 'huawei', 'oneplus', 'vivo', 'realme', 'sony', 'motorola', 'nothing']):
+        return 'Android'
+    return 'Android'
+
+
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description='Compute variance report against targets per group.')
+    parser = argparse.ArgumentParser(description='Compute variance report against targets per group, with Device OS section (30% iOS / 70% Android).')
     parser.add_argument('--participants', '-p', type=str, required=True, help='Path to updated participants CSV.')
     parser.add_argument('--targets', '-t', type=str, required=True, help='Path to targets CSV.')
     parser.add_argument('--group-size', type=int, default=100, help='Expected group size (for sanity checks).')
@@ -304,7 +325,7 @@ def main():
     # Include rows with Status in {'TO_CONTACT', 'CONFIRMED'}
     def norm_row(r: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         status = (r.get(scol, '') or '').strip().upper()
-        if status not in {'TO_CONTACT', 'CONFIRMED'}:
+        if status not in {'TO_CONTACT', 'CONTACTED', 'CONFIRMED'}:
             return None
         sex = normalize_sex(r.get(colmap['sex'] or '', ''))
         race = normalize_race(r.get(colmap['race'] or '', ''))
@@ -325,11 +346,13 @@ def main():
             grp = int((r.get(gcol, '') or '').strip())
         except Exception:
             return None
+        os_norm = normalize_os(r.get(colmap['os'] or '', ''))
         return {
             '__norm_sex': sex or 'Male',
             '__norm_race': race or 'Others',
             '__norm_education_level': edu,
             '__norm_age_group': age_group,
+            '__norm_os': os_norm or 'Android',
             '__group': grp,
         }
 

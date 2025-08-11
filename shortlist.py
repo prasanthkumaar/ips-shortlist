@@ -40,21 +40,20 @@ def best_header_match(headers: List[str], candidates: List[str]) -> Optional[str
 
 
 def detect_columns(headers: List[str]) -> Dict[str, Optional[str]]:
-    # Synonyms by desired key
-    synonyms = {
-        'sex': ['sex', 'gender'],
-        'race': ['race', 'ethnicity'],
-        'education_level': ['education', 'highesteducation', 'edu'],
-        'dob': ['dob', 'dateofbirth', 'dateofbirthfull', 'birthdate', 'birth'],
-        'status': ['status'],
-        'group': ['group'],
-        'name': ['name', 'fullname'],
-        'email': ['email'],
-        'phone': ['phone', 'contact', 'number', 'mobile']
+    # Lock down to exact headers provided by the user
+    header_set = set(headers)
+    mapping: Dict[str, Optional[str]] = {
+        'sex': 'Gender' if 'Gender' in header_set else None,
+        'race': 'Race' if 'Race' in header_set else None,
+        'education_level': 'Education' if 'Education' in header_set else None,
+        'dob': 'DOB' if 'DOB' in header_set else None,
+        'status': 'Status' if 'Status' in header_set else None,
+        'group': 'Group' if 'Group' in header_set else None,
+        'name': 'Name' if 'Name' in header_set else None,
+        'email': 'Email' if 'Email' in header_set else None,
+        'phone': 'Number' if 'Number' in header_set else None,
+        'os': 'OS' if 'OS' in header_set else None,
     }
-    mapping: Dict[str, Optional[str]] = {}
-    for key, cands in synonyms.items():
-        mapping[key] = best_header_match(headers, cands)
     return mapping
 
 # ==========================
@@ -104,6 +103,19 @@ def normalize_education(value: Optional[str]) -> str:
         return 'University'
     # Any unknown → no_info
     return 'no_info'
+
+
+def normalize_os(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    v = value.strip().lower()
+    if 'apple' in v or v == 'ios':
+        return 'iOS'
+    # Treat anything else as Android per provided values
+    if 'android' in v or any(b in v for b in ['samsung', 'google', 'oppo', 'xiaomi', 'huawei', 'oneplus', 'vivo', 'realme', 'sony', 'motorola', 'nothing']):
+        return 'Android'
+    # Default to Android if present but not recognized explicitly
+    return 'Android'
 
 # ==========================
 # Dates and ages
@@ -266,6 +278,12 @@ def mean_abs_dev_over_marginals(group_items: List[Tuple[str, str, str, str]], ta
     return (mad(sex_p, sex_t) + mad(age_p, age_t) + mad(race_p, race_t) + mad(edu_p, edu_t)) / 4.0
 
 
+def mean_abs_dev_for_os(os_list: List[str], target_os: Dict[str, float]) -> float:
+    obs = Counter(os_list)
+    obs_p = proportionize(obs)
+    cats = set(obs_p.keys()) | set(target_os.keys())
+    return sum(abs(obs_p.get(c, 0.0) - target_os.get(c, 0.0)) for c in cats) / max(len(cats), 1)
+
 # ==========================
 # Main selection pipeline
 # ==========================
@@ -312,6 +330,11 @@ def normalize_row(row: Dict[str, Any], colmap: Dict[str, Optional[str]], age_buc
     if age_group in eighteen_to_twentyfour_labels:
         edu_norm = 'no_info'
 
+    os_val = row.get(colmap['os'], '') if colmap.get('os') else ''
+    os_norm = normalize_os(os_val)
+    if not os_norm:
+        return None
+
     # Keep original for writing back
     norm = dict(row)
     norm['__norm_sex'] = sex
@@ -319,6 +342,7 @@ def normalize_row(row: Dict[str, Any], colmap: Dict[str, Optional[str]], age_buc
     norm['__norm_education_level'] = edu_norm
     norm['__norm_age_group'] = age_group
     norm['__norm_status'] = status
+    norm['__norm_os'] = os_norm
     return norm
 
 
@@ -361,11 +385,15 @@ def shortlist(
         normalized_rows.append(norm)
 
     # Pre-account existing CONFIRMED and TO_CONTACT toward quotas
-    confirmed_or_pending: List[Dict[str, Any]] = [r for r in normalized_rows if r['__norm_status'] in {'CONFIRMED', 'TO_CONTACT'}]
+    confirmed_or_pending: List[Dict[str, Any]] = [
+        r for r in normalized_rows if r['__norm_status'] in {'CONFIRMED', 'TO_CONTACT', 'CONTACTED'}
+    ]
     existing_counts = Counter()
+    # Track existing OS counts by group and overall for OS balancing
+    existing_by_group_os: Dict[int, List[str]] = {g: [] for g in GROUPS}
     for r in confirmed_or_pending:
         key = (r['__norm_sex'], r['__norm_age_group'], r['__norm_race'], r['__norm_education_level'])
-        # Only count if key exists in targets
+        # Only count toward 4D targets if key exists in targets
         if key in target_counts:
             existing_counts[key] += 1
 
@@ -385,6 +413,7 @@ def shortlist(
             g_val = None
         if g_val in GROUPS:
             existing_by_group_keys[g_val].append(key)
+            existing_by_group_os[g_val].append(r['__norm_os'])
             current_group_size[g_val] += 1
 
     group_capacity_remaining: Dict[int, int] = {g: max(0, picks_per_group - current_group_size[g]) for g in GROUPS}
@@ -417,14 +446,25 @@ def shortlist(
         selected_indices.extend(pool[:take])
         by_key_pool[key] = pool[take:]
 
-    # If not enough, second pass: score by marginal improvement
+    # OS targets
+    OS_TARGET = {'iOS': 0.3, 'Android': 0.7}
+    total_existing_in_groups = sum(current_group_size.values())
+    total_final_after_selection = total_existing_in_groups + total_new_needed
+    desired_total_ios_count = int(round(OS_TARGET['iOS'] * total_final_after_selection))
+
+    # If not enough, second pass: score by marginal improvement + OS balancing
     if len(selected_indices) < total_new_needed:
         # Build current observed counts (existing + selected so far)
         current_counts = Counter(existing_counts)
+        current_os_counts = Counter()
+        for g in GROUPS:
+            for osv in existing_by_group_os[g]:
+                current_os_counts[osv] += 1
         for i in selected_indices:
             r = eligible[i]
             key = (r['__norm_sex'], r['__norm_age_group'], r['__norm_race'], r['__norm_education_level'])
             current_counts[key] += 1
+            current_os_counts[r['__norm_os']] += 1
 
         # Precompute marginals from targets
         target_marginals = compute_marginal_targets(target_counts)
@@ -446,6 +486,14 @@ def shortlist(
             s += target_marginals[1].get(age, 0) * 1.0
             s += target_marginals[2].get(race, 0) * 0.5
             s += target_marginals[3].get(edu, 0) * 0.5
+            # OS bias toward reaching 30/70 overall
+            if r['__norm_os'] == 'iOS':
+                ios_deficit = desired_total_ios_count - current_os_counts.get('iOS', 0)
+                s += 2.0 if ios_deficit > 0 else -1.0
+            else:
+                desired_android = total_final_after_selection - desired_total_ios_count
+                android_deficit = desired_android - current_os_counts.get('Android', 0)
+                s += 2.0 if android_deficit > 0 else -1.0
             s += random.random() * 0.01
             return s
 
@@ -459,6 +507,7 @@ def shortlist(
 
     # Assign to groups with balancing objective, seeding with existing compositions
     target_marginals = compute_marginal_targets(target_counts)
+    target_os_marginal = {'iOS': 0.3, 'Android': 0.7}
 
     fixed_allocations: Dict[int, List[Tuple[str, str, str, str]]] = {g: list(existing_by_group_keys[g]) for g in GROUPS}
     var_keys: Dict[int, List[Tuple[str, str, str, str]]] = {g: [] for g in GROUPS}
@@ -467,11 +516,21 @@ def shortlist(
     def build_groups_items() -> Dict[int, List[Tuple[str, str, str, str]]]:
         return {g: fixed_allocations[g] + var_keys[g] for g in GROUPS}
 
-    def group_mads(groups_items: Dict[int, List[Tuple[str, str, str, str]]]) -> Dict[int, float]:
-        return {g: mean_abs_dev_over_marginals(groups_items[g], target_marginals) for g in GROUPS}
+    def build_groups_os() -> Dict[int, List[str]]:
+        return {g: existing_by_group_os[g] + [r['__norm_os'] for r in var_rows_by_group[g]] for g in GROUPS}
 
-    def objective(groups_items: Dict[int, List[Tuple[str, str, str, str]]]) -> float:
-        m = group_mads(groups_items)
+    def group_mads(groups_keys: Dict[int, List[Tuple[str, str, str, str]]], groups_os: Dict[int, List[str]]) -> Dict[int, float]:
+        m: Dict[int, float] = {}
+        for g in GROUPS:
+            m4 = mean_abs_dev_over_marginals(groups_keys[g], target_marginals)
+            mos = mean_abs_dev_for_os(groups_os[g], target_os_marginal)
+            # Average across 5 dimensions: 4D + OS
+            overall = (m4 * 4.0 + mos) / 5.0
+            m[g] = overall
+        return m
+
+    def objective(groups_keys: Dict[int, List[Tuple[str, str, str, str]]], groups_os: Dict[int, List[str]]) -> float:
+        m = group_mads(groups_keys, groups_os)
         total = sum(m.values())
         balance = abs(m.get(GROUPS[0], 0.0) - m.get(GROUPS[1], 0.0))
         return total + BALANCE_LAMBDA * balance
@@ -483,13 +542,16 @@ def shortlist(
         key = (r['__norm_sex'], r['__norm_age_group'], r['__norm_race'], r['__norm_education_level'])
         best_g = None
         best_obj = float('inf')
-        base_groups = build_groups_items()
+        base_keys = build_groups_items()
+        base_os = build_groups_os()
         for g in GROUPS:
             if capacity_remaining[g] <= 0:
                 continue
-            trial_groups = {gg: list(base_groups[gg]) for gg in GROUPS}
-            trial_groups[g].append(key)
-            obj = objective(trial_groups)
+            trial_keys = {gg: list(base_keys[gg]) for gg in GROUPS}
+            trial_os = {gg: list(base_os[gg]) for gg in GROUPS}
+            trial_keys[g].append(key)
+            trial_os[g].append(r['__norm_os'])
+            obj = objective(trial_keys, trial_os)
             if obj < best_obj:
                 best_obj = obj
                 best_g = g
@@ -504,7 +566,7 @@ def shortlist(
 
     # Swap pass over new picks only
     def build_current_obj() -> float:
-        return objective(build_groups_items())
+        return objective(build_groups_items(), build_groups_os())
 
     current_obj = build_current_obj()
     iters = 0
@@ -591,7 +653,7 @@ def shortlist(
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description='Shortlist participants into two groups while matching Singapore demographics.')
+    parser = argparse.ArgumentParser(description='Shortlist participants into two groups while matching Singapore demographics and OS ratio (30% iOS / 70% Android).')
     parser.add_argument('--participants', '-p', type=str, required=True, help='Path to participants CSV (source of truth).')
     parser.add_argument('--targets', '-t', type=str, required=True, help='Path to targets CSV (ground truth counts).')
     parser.add_argument('--seed', type=int, default=DEFAULT_SEED, help='Random seed for reproducibility.')
