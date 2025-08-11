@@ -5,7 +5,7 @@ This repo shortlists participants into two groups while matching Singapore demog
 ## Data files
 
 - `final_2024_agegroup_sex_race_education.csv`: target counts with header `age_group,sex,race,education_level,count`
-- `data/GovernmentCallStudyAug2025_2025-08-09.csv`: source participants
+- `data/GovernmentCallStudyAug2025_2025-08-11.csv`: source participants
 
 ## Column headers (locked)
 
@@ -40,19 +40,19 @@ Python 3.9+ recommended.
 
 ```bash
 python3 shortlist.py \
-  --participants data/GovernmentCallStudyAug2025_2025-08-09.csv \
+  --participants data/GovernmentCallStudyAug2025_2025-08-11.csv \
   --targets final_2024_agegroup_sex_race_education.csv \
   --seed 42 --per_group 100
 ```
 
-- Output: `data/GovernmentCallStudyAug2025_2025-08-09.updated.csv`
+- Output: `data/GovernmentCallStudyAug2025_2025-08-11.updated.csv`
 - The script prints a one-line command to run the variance report (it uses absolute paths for convenience; you can run an equivalent relative-path command shown below).
 
 2. Variance report (per group, with overall variance %; lower is better)
 
 ```bash
 python3 variance_checker.py \
-  --participants data/GovernmentCallStudyAug2025_2025-08-09.updated.csv \
+  --participants data/GovernmentCallStudyAug2025_2025-08-11.updated.csv \
   --targets final_2024_agegroup_sex_race_education.csv
 ```
 
