@@ -36,7 +36,7 @@ Python 3.9+ recommended.
 
 ## Usage (relative paths)
 
-1. Shortlist (creates/overwrites updated CSV and prints variance command)
+1. Shortlist with the same total size per group (default behavior)
 
 ```bash
 python3 shortlist.py \
@@ -45,10 +45,22 @@ python3 shortlist.py \
   --seed 42 --per_group 100
 ```
 
+- `--per_group` now means the target total size for each group including existing CONFIRMED/TO_CONTACT/CONTACTED. The script tops up from `REGISTERED` to reach this total per group.
 - Output: `data/GovernmentCallStudyAug2025_2025-08-11.updated.csv`
 - The script prints a one-line command to run the variance report (it uses absolute paths for convenience; you can run an equivalent relative-path command shown below).
 
-2. Variance report (per group, with overall variance %; lower is better)
+2. Shortlist with different totals for Group 1 and Group 2
+
+```bash
+python3 shortlist.py \
+  --participants data/GovernmentCallStudyAug2025_2025-08-11.csv \
+  --targets final_2024_agegroup_sex_race_education.csv \
+  --group1 120 --group2 80
+```
+
+- `--group1` and `--group2` set target totals for Group 1 and Group 2 respectively (including existing). If provided, they override `--per_group` for that group.
+
+3. Variance report (per group, with overall variance %; lower is better)
 
 ```bash
 python3 variance_checker.py \
@@ -64,7 +76,7 @@ python3 variance_checker.py \
 - Pre-accounts existing `CONFIRMED`/`TO_CONTACT`/`CONTACTED`:
   - Uses their existing `Group` (if present) to seed each group’s composition
   - Excludes them from new picks
-- Computes per-group “top-up” needed (to reach `--per_group` each). If some participants later reject and statuses change, re-running the shortlist tops up from remaining `REGISTERED`.
+- Computes per-group “top-up” needed to reach the specified totals (`--per_group` or `--group1`/`--group2`). If some participants later reject and statuses change, re-running the shortlist tops up from remaining `REGISTERED`.
 - Selects new participants from `REGISTERED`:
   - First, fills 4D deficits (sex × age_group × race × education_level)
   - Then, scores remaining candidates by marginal improvement vs targets, with an additional bias to hit the overall 30% iOS / 70% Android ratio across the combined sample

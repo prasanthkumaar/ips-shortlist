@@ -367,6 +367,8 @@ def shortlist(
     targets_csv: str,
     seed: int = DEFAULT_SEED,
     picks_per_group: int = NEW_PICKS_PER_GROUP,
+    group1_total: Optional[int] = None,
+    group2_total: Optional[int] = None,
 ) -> str:
     random.seed(seed)
 
@@ -416,7 +418,13 @@ def shortlist(
             existing_by_group_os[g_val].append(r['__norm_os'])
             current_group_size[g_val] += 1
 
-    group_capacity_remaining: Dict[int, int] = {g: max(0, picks_per_group - current_group_size[g]) for g in GROUPS}
+    # Determine targets by group (including existing), defaulting to picks_per_group if not overridden
+    targets_by_group: Dict[int, int] = {
+        1: group1_total if group1_total is not None else picks_per_group,
+        2: group2_total if group2_total is not None else picks_per_group,
+    }
+
+    group_capacity_remaining: Dict[int, int] = {g: max(0, targets_by_group[g] - current_group_size[g]) for g in GROUPS}
     total_new_needed = sum(group_capacity_remaining.values())
 
     # Build desired new quotas at 4D level accounting for existing locked/pending
@@ -657,10 +665,19 @@ def main():
     parser.add_argument('--participants', '-p', type=str, required=True, help='Path to participants CSV (source of truth).')
     parser.add_argument('--targets', '-t', type=str, required=True, help='Path to targets CSV (ground truth counts).')
     parser.add_argument('--seed', type=int, default=DEFAULT_SEED, help='Random seed for reproducibility.')
-    parser.add_argument('--per_group', type=int, default=NEW_PICKS_PER_GROUP, help='New picks per group.')
+    parser.add_argument('--per_group', type=int, default=NEW_PICKS_PER_GROUP, help='Target total per group (including existing).')
+    parser.add_argument('--group1', '-g1', type=int, default=None, help='Target total for Group 1 (including existing). Overrides --per_group for Group 1 if provided.')
+    parser.add_argument('--group2', '-g2', type=int, default=None, help='Target total for Group 2 (including existing). Overrides --per_group for Group 2 if provided.')
     args = parser.parse_args()
 
-    updated = shortlist(args.participants, args.targets, seed=args.seed, picks_per_group=args.per_group)
+    updated = shortlist(
+        args.participants,
+        args.targets,
+        seed=args.seed,
+        picks_per_group=args.per_group,
+        group1_total=args.group1,
+        group2_total=args.group2,
+    )
     print(f'Updated CSV written to: {updated}')
     # Also print a ready-to-run variance checker command (absolute paths)
     shortlist_dir = os.path.dirname(os.path.abspath(__file__))
