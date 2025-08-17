@@ -2,6 +2,7 @@ import csv
 from collections import Counter, defaultdict
 from typing import Dict, Tuple, List, Any, Optional
 from datetime import datetime, date
+import config
 
 
 def proportionize(counter: Dict[Any, int]) -> Dict[Any, float]:
@@ -290,29 +291,31 @@ def normalize_education(value: Optional[str]) -> str:
 
 def normalize_os(value: Optional[str]) -> Optional[str]:
     if value is None:
-        return None
-    v = value.strip().lower()
-    if 'apple' in v or v == 'ios':
+        raise ValueError("OS value is missing; expected 'Apple' or 'Android (e.g., Samsung, Google, Oppo, Xiaomi, Huawei)'.")
+    v = value.strip()
+    if v == 'Apple':
         return 'iOS'
-    if 'android' in v or any(b in v for b in ['samsung', 'google', 'oppo', 'xiaomi', 'huawei', 'oneplus', 'vivo', 'realme', 'sony', 'motorola', 'nothing']):
+    if v == 'Android (e.g., Samsung, Google, Oppo, Xiaomi, Huawei)':
         return 'Android'
-    return 'Android'
+    raise ValueError(f"Unknown OS value '{value}'. Expected 'Apple' or 'Android (e.g., Samsung, Google, Oppo, Xiaomi, Huawei)'.")
 
 
 def main():
-    import argparse
-    parser = argparse.ArgumentParser(description='Compute variance report against targets per group, with Device OS section (30% iOS / 70% Android).')
-    parser.add_argument('--participants', '-p', type=str, required=True, help='Path to updated participants CSV.')
-    parser.add_argument('--targets', '-t', type=str, required=True, help='Path to targets CSV.')
-    parser.add_argument('--group-size', type=int, default=100, help='Expected group size (for sanity checks).')
-    args = parser.parse_args()
+    participants_path = getattr(config, 'VARIANCE_PARTICIPANTS_CSV', None)
+    if not participants_path:
+        base = getattr(config, 'PARTICIPANTS_CSV', '')
+        participants_path = base.replace('.csv', '.updated.csv') if base else ''
+    targets_path = getattr(config, 'TARGETS_CSV', '')
 
-    targets, age_groups_order = load_targets(args.targets)
+    if not participants_path or not targets_path:
+        raise ValueError('Missing PARTICIPANTS_CSV/TARGETS_CSV in config for variance checker.')
+
+    targets, age_groups_order = load_targets(targets_path)
     target_marginals = compute_marginal_targets(targets)
     age_bucket = make_age_bucketer(age_groups_order)
     eighteen_to_twentyfour_labels = {lbl for lbl in age_groups_order if ('18-19' in lbl or '20-24' in lbl)}
 
-    with open(args.participants, 'r', newline='', encoding='utf-8') as f:
+    with open(participants_path, 'r', newline='', encoding='utf-8') as f:
         reader = csv.DictReader(f)
         headers = reader.fieldnames or []
         colmap = detect_columns(headers)
@@ -342,10 +345,25 @@ def main():
             return None
         if age_group in eighteen_to_twentyfour_labels:
             edu = 'no_info'
-        try:
-            grp = int((r.get(gcol, '') or '').strip())
-        except Exception:
+        grp_raw = (r.get(gcol, '') or '').strip()
+        if not grp_raw:
             return None
+        # Normalize to configured label if numeric
+        group_labels = list(getattr(config, 'GROUP_LABELS', []))
+        if grp_raw.isdigit() and group_labels:
+            idx = int(grp_raw)
+            if 1 <= idx <= len(group_labels):
+                grp_label = group_labels[idx - 1]
+            else:
+                grp_label = grp_raw
+        else:
+            # Case-insensitive match to configured labels if possible
+            found = None
+            for lbl in group_labels:
+                if lbl.lower() == grp_raw.lower():
+                    found = lbl
+                    break
+            grp_label = found if found else grp_raw
         os_norm = normalize_os(r.get(colmap['os'] or '', ''))
         return {
             '__norm_sex': sex or 'Male',
@@ -353,17 +371,17 @@ def main():
             '__norm_education_level': edu,
             '__norm_age_group': age_group,
             '__norm_os': os_norm or 'Android',
-            '__group': grp,
+            '__group': grp_label,
         }
 
     normalized = [nr for nr in (norm_row(r) for r in rows) if nr]
 
-    by_group: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    by_group: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for r in normalized:
         by_group[r['__group']].append(r)
 
     for g in sorted(by_group.keys()):
-        print(f"===== Group {g} (n={len(by_group[g])}) =====")
+        print(f"===== {g} (n={len(by_group[g])}) =====")
         print(report_for_group(by_group[g], target_marginals))
         print()
 

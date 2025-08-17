@@ -5,13 +5,13 @@ import random
 from collections import Counter, defaultdict
 from datetime import datetime, date
 from typing import Dict, List, Tuple, Optional, Any, Set
+import config
 
 # ==========================
 # Configuration
 # ==========================
 DEFAULT_SEED = 42
 NEW_PICKS_PER_GROUP = 100
-GROUPS = [1, 2]
 BALANCE_LAMBDA = 0.5
 SWAP_TRIES_PER_ITER = 20
 MAX_SWAP_ITERS = 500
@@ -53,6 +53,7 @@ def detect_columns(headers: List[str]) -> Dict[str, Optional[str]]:
         'email': 'Email' if 'Email' in header_set else None,
         'phone': 'Number' if 'Number' in header_set else None,
         'os': 'OS' if 'OS' in header_set else None,
+        'uin': 'UIN' if 'UIN' in header_set else None,
     }
     return mapping
 
@@ -107,15 +108,13 @@ def normalize_education(value: Optional[str]) -> str:
 
 def normalize_os(value: Optional[str]) -> Optional[str]:
     if value is None:
-        return None
-    v = value.strip().lower()
-    if 'apple' in v or v == 'ios':
+        raise ValueError("OS value is missing; expected 'Apple' or 'Android (e.g., Samsung, Google, Oppo, Xiaomi, Huawei)'.")
+    v = value.strip()
+    if v == 'Apple':
         return 'iOS'
-    # Treat anything else as Android per provided values
-    if 'android' in v or any(b in v for b in ['samsung', 'google', 'oppo', 'xiaomi', 'huawei', 'oneplus', 'vivo', 'realme', 'sony', 'motorola', 'nothing']):
+    if v == 'Android (e.g., Samsung, Google, Oppo, Xiaomi, Huawei)':
         return 'Android'
-    # Default to Android if present but not recognized explicitly
-    return 'Android'
+    raise ValueError(f"Unknown OS value '{value}'. Expected 'Apple' or 'Android (e.g., Samsung, Google, Oppo, Xiaomi, Huawei)'.")
 
 # ==========================
 # Dates and ages
@@ -288,13 +287,74 @@ def mean_abs_dev_for_os(os_list: List[str], target_os: Dict[str, float]) -> floa
 # Main selection pipeline
 # ==========================
 
+
 def load_participants(csv_path: str) -> Tuple[List[Dict[str, Any]], Dict[str, Optional[str]]]:
     with open(csv_path, 'r', newline='', encoding='utf-8') as f:
         reader = csv.DictReader(f)
         rows = list(reader)
         headers = reader.fieldnames or []
     colmap = detect_columns(headers)
-    return rows, colmap
+
+    # Require UIN column to exist
+    if not colmap.get('uin'):
+        raise ValueError("Missing required 'UIN' column in participants CSV.")
+
+    # Validate all rows have non-empty UIN and deduplicate by UIN across all statuses
+    uin_col = colmap['uin']
+    status_col = colmap.get('status')
+
+    # Higher value = higher priority to keep when duplicate UINs are present
+    status_priority = {
+        'CONFIRMED': 4,
+        'CONTACTED': 3,
+        'TO_CONTACT': 2,
+        'REGISTERED': 1,
+    }
+
+    dedup_by_uin: Dict[str, Dict[str, Any]] = {}
+    for idx, row in enumerate(rows, start=1):
+        uin_val = (row.get(uin_col, '') or '').strip()
+        if not uin_val:
+            raise ValueError(f"Row {idx} is missing a UIN value. All rows must include a UIN.")
+        current_status = (row.get(status_col, '') or '').strip().upper() if status_col else ''
+        current_priority = status_priority.get(current_status, 0)
+
+        if uin_val not in dedup_by_uin:
+            dedup_by_uin[uin_val] = row
+        else:
+            existing_row = dedup_by_uin[uin_val]
+            existing_status = (existing_row.get(status_col, '') or '').strip().upper() if status_col else ''
+            existing_priority = status_priority.get(existing_status, 0)
+            # Keep the row with higher status priority; if tie, keep the first seen
+            if current_priority > existing_priority:
+                dedup_by_uin[uin_val] = row
+
+    deduped_rows = list(dedup_by_uin.values())
+    return deduped_rows, colmap
+
+
+def load_blacklisted_uins(blacklist_dir: str) -> Tuple[Dict[str, Set[str]], List[str]]:
+    # Ensures blacklist directory exists and loads all CSVs with a UIN column.
+    if not os.path.isdir(blacklist_dir):
+        raise ValueError("Missing 'blacklist' folder next to the script.")
+
+    blacklist_map: Dict[str, Set[str]] = defaultdict(set)
+    entries = [e for e in os.listdir(blacklist_dir) if e.lower().endswith('.csv')]
+
+    for filename in entries:
+        full_path = os.path.join(blacklist_dir, filename)
+        with open(full_path, 'r', newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            headers = reader.fieldnames or []
+            if 'UIN' not in headers:
+                raise ValueError(f"Blacklist file '{filename}' is missing required 'UIN' column.")
+            for row in reader:
+                uin_val = (row.get('UIN', '') or '').strip()
+                if not uin_val:
+                    continue
+                blacklist_map[uin_val].add(filename)
+
+    return blacklist_map, entries
 
 
 def normalize_row(row: Dict[str, Any], colmap: Dict[str, Optional[str]], age_bucket, eighteen_to_twentyfour_labels: Set[str]) -> Optional[Dict[str, Any]]:
@@ -366,9 +426,6 @@ def shortlist(
     participants_csv: str,
     targets_csv: str,
     seed: int = DEFAULT_SEED,
-    picks_per_group: int = NEW_PICKS_PER_GROUP,
-    group1_total: Optional[int] = None,
-    group2_total: Optional[int] = None,
 ) -> str:
     random.seed(seed)
 
@@ -377,6 +434,29 @@ def shortlist(
     eighteen_to_twentyfour_labels = {lbl for lbl in age_groups_order if ('18-19' in lbl or '20-24' in lbl)}
 
     rows, colmap = load_participants(participants_csv)
+
+    # Blacklist pre-check: abort if any participant UIN is found in blacklist CSVs
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    blacklist_dir = os.path.join(script_dir, 'blacklist')
+    blacklist_map, scanned_files = load_blacklisted_uins(blacklist_dir)
+
+    if scanned_files:
+        print('Scanned blacklist files: ' + ', '.join(sorted(scanned_files)))
+    else:
+        print("No blacklist CSV files found in 'blacklist' folder.")
+
+    hits: List[str] = []
+    uin_col = colmap['uin']
+    name_col = colmap.get('name') or 'Name'
+    for r in rows:
+        uin_val = (r.get(uin_col, '') or '').strip()
+        if uin_val in blacklist_map:
+            name_val = (r.get(name_col, '') or '').strip()
+            sources = ', '.join(sorted(blacklist_map[uin_val]))
+            hits.append(f"{name_val} {uin_val} blacklisted in {sources} file")
+
+    if hits:
+        raise ValueError('Blacklisted participants found; aborting shortlist.\n' + '\n'.join(hits))
 
     # Normalize rows and separate by status
     normalized_rows: List[Dict[str, Any]] = []
@@ -392,7 +472,8 @@ def shortlist(
     ]
     existing_counts = Counter()
     # Track existing OS counts by group and overall for OS balancing
-    existing_by_group_os: Dict[int, List[str]] = {g: [] for g in GROUPS}
+    group_labels: List[str] = list(config.GROUP_LABELS)
+    existing_by_group_os: Dict[str, List[str]] = {g: [] for g in group_labels}
     for r in confirmed_or_pending:
         key = (r['__norm_sex'], r['__norm_age_group'], r['__norm_race'], r['__norm_education_level'])
         # Only count toward 4D targets if key exists in targets
@@ -404,27 +485,53 @@ def shortlist(
 
     # Per-group top-up: compute current group sizes and remaining capacity
     group_header_in = colmap['group'] if colmap['group'] else 'Group'
-    existing_by_group_keys: Dict[int, List[Tuple[str, str, str, str]]] = {g: [] for g in GROUPS}
-    current_group_size: Dict[int, int] = {g: 0 for g in GROUPS}
+    existing_by_group_keys: Dict[str, List[Tuple[str, str, str, str]]] = {g: [] for g in group_labels}
+    current_group_size: Dict[str, int] = {g: 0 for g in group_labels}
+
+    # Helper to normalize raw group cell to one of our configured labels
+    def normalize_group_label(raw_val: Any) -> Optional[str]:
+        if raw_val is None:
+            return None
+        s = str(raw_val).strip()
+        if not s:
+            return None
+        # Try numeric index (1-based)
+        if s.isdigit():
+            idx = int(s)
+            if 1 <= idx <= len(group_labels):
+                return group_labels[idx - 1]
+        # Match case-insensitive against labels
+        s_lower = s.lower()
+        for lbl in group_labels:
+            if lbl.lower() == s_lower:
+                return lbl
+        return None
+
     for r in confirmed_or_pending:
         key = (r['__norm_sex'], r['__norm_age_group'], r['__norm_race'], r['__norm_education_level'])
         g_raw = r.get(group_header_in)
-        try:
-            g_val = int(str(g_raw).strip()) if g_raw is not None and str(g_raw).strip() != '' else None
-        except Exception:
-            g_val = None
-        if g_val in GROUPS:
-            existing_by_group_keys[g_val].append(key)
-            existing_by_group_os[g_val].append(r['__norm_os'])
-            current_group_size[g_val] += 1
+        g_label = normalize_group_label(g_raw)
+        if g_label in existing_by_group_keys:
+            existing_by_group_keys[g_label].append(key)
+            existing_by_group_os[g_label].append(r['__norm_os'])
+            current_group_size[g_label] += 1
 
     # Determine targets by group (including existing), defaulting to picks_per_group if not overridden
-    targets_by_group: Dict[int, int] = {
-        1: group1_total if group1_total is not None else picks_per_group,
-        2: group2_total if group2_total is not None else picks_per_group,
-    }
+    # Base targets from config only; all labels must be present
+    targets_by_group: Dict[str, int] = {}
+    missing_totals: List[str] = []
+    for lbl in group_labels:
+        if lbl not in config.GROUP_TOTALS:
+            missing_totals.append(lbl)
+        else:
+            try:
+                targets_by_group[lbl] = int(config.GROUP_TOTALS[lbl])
+            except Exception:
+                raise ValueError(f"Invalid total for group '{lbl}' in config.GROUP_TOTALS; must be an integer.")
+    if missing_totals:
+        raise ValueError("Missing totals in config.GROUP_TOTALS for labels: " + ', '.join(missing_totals))
 
-    group_capacity_remaining: Dict[int, int] = {g: max(0, targets_by_group[g] - current_group_size[g]) for g in GROUPS}
+    group_capacity_remaining: Dict[str, int] = {g: max(0, targets_by_group[g] - current_group_size[g]) for g in group_labels}
     total_new_needed = sum(group_capacity_remaining.values())
 
     # Build desired new quotas at 4D level accounting for existing locked/pending
@@ -465,7 +572,7 @@ def shortlist(
         # Build current observed counts (existing + selected so far)
         current_counts = Counter(existing_counts)
         current_os_counts = Counter()
-        for g in GROUPS:
+        for g in group_labels:
             for osv in existing_by_group_os[g]:
                 current_os_counts[osv] += 1
         for i in selected_indices:
@@ -517,19 +624,19 @@ def shortlist(
     target_marginals = compute_marginal_targets(target_counts)
     target_os_marginal = {'iOS': 0.3, 'Android': 0.7}
 
-    fixed_allocations: Dict[int, List[Tuple[str, str, str, str]]] = {g: list(existing_by_group_keys[g]) for g in GROUPS}
-    var_keys: Dict[int, List[Tuple[str, str, str, str]]] = {g: [] for g in GROUPS}
-    var_rows_by_group: Dict[int, List[Dict[str, Any]]] = {g: [] for g in GROUPS}
+    fixed_allocations: Dict[str, List[Tuple[str, str, str, str]]] = {g: list(existing_by_group_keys[g]) for g in group_labels}
+    var_keys: Dict[str, List[Tuple[str, str, str, str]]] = {g: [] for g in group_labels}
+    var_rows_by_group: Dict[str, List[Dict[str, Any]]] = {g: [] for g in group_labels}
 
-    def build_groups_items() -> Dict[int, List[Tuple[str, str, str, str]]]:
-        return {g: fixed_allocations[g] + var_keys[g] for g in GROUPS}
+    def build_groups_items() -> Dict[str, List[Tuple[str, str, str, str]]]:
+        return {g: fixed_allocations[g] + var_keys[g] for g in group_labels}
 
-    def build_groups_os() -> Dict[int, List[str]]:
-        return {g: existing_by_group_os[g] + [r['__norm_os'] for r in var_rows_by_group[g]] for g in GROUPS}
+    def build_groups_os() -> Dict[str, List[str]]:
+        return {g: existing_by_group_os[g] + [r['__norm_os'] for r in var_rows_by_group[g]] for g in group_labels}
 
-    def group_mads(groups_keys: Dict[int, List[Tuple[str, str, str, str]]], groups_os: Dict[int, List[str]]) -> Dict[int, float]:
-        m: Dict[int, float] = {}
-        for g in GROUPS:
+    def group_mads(groups_keys: Dict[str, List[Tuple[str, str, str, str]]], groups_os: Dict[str, List[str]]) -> Dict[str, float]:
+        m: Dict[str, float] = {}
+        for g in group_labels:
             m4 = mean_abs_dev_over_marginals(groups_keys[g], target_marginals)
             mos = mean_abs_dev_for_os(groups_os[g], target_os_marginal)
             # Average across 5 dimensions: 4D + OS
@@ -537,10 +644,13 @@ def shortlist(
             m[g] = overall
         return m
 
-    def objective(groups_keys: Dict[int, List[Tuple[str, str, str, str]]], groups_os: Dict[int, List[str]]) -> float:
+    def objective(groups_keys: Dict[str, List[Tuple[str, str, str, str]]], groups_os: Dict[str, List[str]]) -> float:
         m = group_mads(groups_keys, groups_os)
-        total = sum(m.values())
-        balance = abs(m.get(GROUPS[0], 0.0) - m.get(GROUPS[1], 0.0))
+        if m:
+            vals = list(m.values())
+            balance = max(vals) - min(vals)
+        else:
+            balance = 0.0
         return total + BALANCE_LAMBDA * balance
 
     capacity_remaining = dict(group_capacity_remaining)
@@ -552,11 +662,11 @@ def shortlist(
         best_obj = float('inf')
         base_keys = build_groups_items()
         base_os = build_groups_os()
-        for g in GROUPS:
+        for g in group_labels:
             if capacity_remaining[g] <= 0:
                 continue
-            trial_keys = {gg: list(base_keys[gg]) for gg in GROUPS}
-            trial_os = {gg: list(base_os[gg]) for gg in GROUPS}
+            trial_keys = {gg: list(base_keys[gg]) for gg in group_labels}
+            trial_os = {gg: list(base_os[gg]) for gg in group_labels}
             trial_keys[g].append(key)
             trial_os[g].append(r['__norm_os'])
             obj = objective(trial_keys, trial_os)
@@ -565,8 +675,8 @@ def shortlist(
                 best_g = g
         if best_g is None:
             # Fallback to any group with capacity
-            candidates = [g for g in GROUPS if capacity_remaining[g] > 0]
-            best_g = candidates[0] if candidates else GROUPS[0]
+            candidates = [g for g in group_labels if capacity_remaining[g] > 0]
+            best_g = candidates[0] if candidates else group_labels[0]
         var_keys[best_g].append(key)
         var_rows_by_group[best_g].append(r)
         r['__assigned_group'] = best_g
@@ -583,9 +693,10 @@ def shortlist(
         iters += 1
         improved = False
         for _ in range(SWAP_TRIES_PER_ITER):
-            a_group, b_group = GROUPS
-            if not var_keys[a_group] or not var_keys[b_group]:
+            non_empty = [g for g in group_labels if var_keys[g]]
+            if len(non_empty) < 2:
                 break
+            a_group, b_group = random.sample(non_empty, 2)
             i = random.randrange(0, len(var_keys[a_group]))
             j = random.randrange(0, len(var_keys[b_group]))
             # Swap keys and rows
@@ -629,10 +740,7 @@ def shortlist(
     # Use tuple of stable identifying fields; fallback to object id
     def row_identity(r: Dict[str, Any]) -> Tuple:
         return (
-            r.get(colmap.get('name') or '', ''),
-            r.get(colmap.get('email') or '', ''),
-            r.get(colmap.get('phone') or '', ''),
-            r.get(colmap.get('dob') or '', ''),
+            (r.get(colmap.get('uin') or 'UIN', '') or '').strip(),
         )
 
     selected_id_to_group: Dict[Tuple, int] = {}
@@ -660,30 +768,17 @@ def shortlist(
 
 
 def main():
-    import argparse
-    parser = argparse.ArgumentParser(description='Shortlist participants into two groups while matching Singapore demographics and OS ratio (30% iOS / 70% Android).')
-    parser.add_argument('--participants', '-p', type=str, required=True, help='Path to participants CSV (source of truth).')
-    parser.add_argument('--targets', '-t', type=str, required=True, help='Path to targets CSV (ground truth counts).')
-    parser.add_argument('--seed', type=int, default=DEFAULT_SEED, help='Random seed for reproducibility.')
-    parser.add_argument('--per_group', type=int, default=NEW_PICKS_PER_GROUP, help='Target total per group (including existing).')
-    parser.add_argument('--group1', '-g1', type=int, default=None, help='Target total for Group 1 (including existing). Overrides --per_group for Group 1 if provided.')
-    parser.add_argument('--group2', '-g2', type=int, default=None, help='Target total for Group 2 (including existing). Overrides --per_group for Group 2 if provided.')
-    args = parser.parse_args()
-
     updated = shortlist(
-        args.participants,
-        args.targets,
-        seed=args.seed,
-        picks_per_group=args.per_group,
-        group1_total=args.group1,
-        group2_total=args.group2,
+        config.PARTICIPANTS_CSV,
+        config.TARGETS_CSV,
+        seed=int(getattr(config, 'SEED', DEFAULT_SEED)),
     )
     print(f'Updated CSV written to: {updated}')
     # Also print a ready-to-run variance checker command (absolute paths)
     shortlist_dir = os.path.dirname(os.path.abspath(__file__))
     variance_path = os.path.join(shortlist_dir, 'variance_checker.py')
     updated_abs = os.path.abspath(updated)
-    targets_abs = os.path.abspath(args.targets)
+    targets_abs = os.path.abspath(config.TARGETS_CSV)
     print('Run this to view variance per group:')
     print(f'python3 {variance_path} --participants "{updated_abs}" --targets "{targets_abs}"')
 

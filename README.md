@@ -1,6 +1,6 @@
 # IPS Shortlist
 
-This repo shortlists participants into two groups while matching Singapore demographics (sex, age_group, race, education_level), adds an OS ratio constraint (iOS vs Android), and reports variance to targets.
+This repo shortlists participants into groups while matching Singapore demographics (sex, age_group, race, education_level), adds an OS ratio constraint (iOS vs Android), and reports variance to targets.
 
 ## Data files
 
@@ -11,14 +11,14 @@ This repo shortlists participants into two groups while matching Singapore demog
 
 Participants CSV must include these exact headers:
 
-- `Name`, `Gender`, `Race`, `DOB`, `Education`, `Number`, `OS`, `Group`, `Status`
+- `UIN`, `Name`, `Gender`, `Race`, `DOB`, `Education`, `Number`, `OS`, `Group`, `Status`
 
 Notes:
 
-- `OS` values are normalized to two categories:
-  - iOS: any value containing `Apple` (or `iOS`)
-  - Android: any value containing `Android` or brands like `Samsung`, `Google`, `Oppo`, `Xiaomi`, `Huawei`, `OnePlus`, `Vivo`, `Realme`, `Sony`, `Motorola`, `Nothing`
-- Unknown OS values default to Android. If you want strict validation instead (exclude unknowns), update `normalize_os`.
+- `OS` values are strictly validated:
+  - iOS: exactly `Apple`
+  - Android: exactly `Android (e.g., Samsung, Google, Oppo, Xiaomi, Huawei)`
+  - Any other value (including lowercase or variants) will cause an error.
 
 ## Global rules
 
@@ -29,43 +29,62 @@ Notes:
   - `Status == TO_CONTACT` or `CONTACTED` → pending; excluded from new selection but counted toward current composition (by `Group` if present)
 - Special: education for 18–24 is set to `no_info`
 - Device OS target share is fixed at 30% iOS / 70% Android across the final combined sample (existing + new picks), and group assignment also balances each group toward 30/70.
+- All rows must include a non-empty `UIN`. The script errors if the `UIN` column is missing or any row has an empty `UIN`.
+- Participants are deduplicated by `UIN` across all statuses. When duplicates are found, the row with the highest status priority is kept: `CONFIRMED` > `CONTACTED` > `TO_CONTACT` > `REGISTERED` (others lowest).
+- Blacklist pre-check: before any selection runs, the script scans the `blacklist/` folder and aborts if any participant UIN appears in any blacklist CSV.
+
+## Dynamic groups (config.py)
+
+- Configure any number of groups and their labels/totals in `config.py`:
+
+```python
+GROUP_LABELS = [
+    "Group 1",
+    "Group 2",
+    # add more, e.g., "Group 3"
+]
+
+# Required per-group totals (including existing). Every label in GROUP_LABELS must have a total.
+GROUP_TOTALS = {
+    "Group 1": 120,
+    "Group 2": 80,
+    # "Group 3": 50,
+}
+```
+
+- The `Group` column in the participants CSV can contain either the configured label (case-insensitive) or a 1-based index (e.g., `1` for `Group 1`).
+- The shortlist will write the configured label string into the `Group` column for new picks.
+
+## Blacklist
+
+- Location: a folder named `blacklist` next to `shortlist.py` (i.e., in the repo root). The folder must exist; otherwise the script errors.
+- Files: every `.csv` file in `blacklist/` is treated as a blacklist source and must include a `UIN` column. If any CSV is missing `UIN`, the script errors.
+- Behavior:
+  - The script prints which blacklist files were scanned, e.g., `Scanned blacklist files: studyA.csv, studyB.csv`. If the folder exists but contains no CSVs, it prints: `No blacklist CSV files found in 'blacklist' folder.`
+  - If any participant UIN in the input participants CSV appears in any blacklist CSV, the script aborts without shortlisting and prints a list like:
+    - `{{Name}} {{UIN}} blacklisted in {{studyA.csv, studyB.csv}} file`
 
 ## Install
 
 Python 3.9+ recommended.
 
-## Usage (relative paths)
+## Usage
 
-1. Shortlist with the same total size per group (default behavior)
+Set paths and group config in `config.py`, then run:
+
+1. Shortlist (uses config paths and seed)
 
 ```bash
-python3 shortlist.py \
-  --participants data/GovernmentCallStudyAug2025_2025-08-11.csv \
-  --targets final_2024_agegroup_sex_race_education.csv \
-  --seed 42 --per_group 100
+python3 shortlist.py
 ```
 
-- `--per_group` now means the target total size for each group including existing CONFIRMED/TO_CONTACT/CONTACTED. The script tops up from `REGISTERED` to reach this total per group.
-- Output: `data/GovernmentCallStudyAug2025_2025-08-11.updated.csv`
-- The script prints a one-line command to run the variance report (it uses absolute paths for convenience; you can run an equivalent relative-path command shown below).
+- Output: `<participants>.updated.csv`
+- The script prints a one-line command for the variance checker with absolute paths; you can run it directly or the simple command below.
 
-2. Shortlist with different totals for Group 1 and Group 2
-
-```bash
-python3 shortlist.py \
-  --participants data/GovernmentCallStudyAug2025_2025-08-11.csv \
-  --targets final_2024_agegroup_sex_race_education.csv \
-  --group1 120 --group2 80
-```
-
-- `--group1` and `--group2` set target totals for Group 1 and Group 2 respectively (including existing). If provided, they override `--per_group` for that group.
-
-3. Variance report (per group, with overall variance %; lower is better)
+2. Variance report (uses config paths)
 
 ```bash
-python3 variance_checker.py \
-  --participants data/GovernmentCallStudyAug2025_2025-08-11.updated.csv \
-  --targets final_2024_agegroup_sex_race_education.csv
+python3 variance_checker.py
 ```
 
 ## What the shortlist does
@@ -76,19 +95,16 @@ python3 variance_checker.py \
 - Pre-accounts existing `CONFIRMED`/`TO_CONTACT`/`CONTACTED`:
   - Uses their existing `Group` (if present) to seed each group’s composition
   - Excludes them from new picks
-- Computes per-group “top-up” needed to reach the specified totals (`--per_group` or `--group1`/`--group2`). If some participants later reject and statuses change, re-running the shortlist tops up from remaining `REGISTERED`.
+- Computes per-group “top-up” needed to reach the specified totals from `config.py`.
 - Selects new participants from `REGISTERED`:
   - First, fills 4D deficits (sex × age_group × race × education_level)
   - Then, scores remaining candidates by marginal improvement vs targets, with an additional bias to hit the overall 30% iOS / 70% Android ratio across the combined sample
-- Assigns new picks to `Group` 1 or 2 to minimize overall variance and keep groups similar:
+- Assigns new picks to configured groups to minimize overall variance and keep groups similar:
   - Objective includes 4D demographics and Device OS; also applies a balance penalty between groups
   - Performs a swap pass over new picks only to further lower and balance variance
-- Writes the updated CSV with `Status=TO_CONTACT` and `Group∈{1,2}` for new picks only
-
-## Re-running after updates (top-up)
-
-- If some `TO_CONTACT`/`CONTACTED` are rejected and their status changes (e.g., removed or set not REGISTERED), simply re-run the shortlist command.
-- The script will recompute per-group deficits, pre-account current `CONFIRMED`/`TO_CONTACT`/`CONTACTED` (with their groups), and top up from remaining `REGISTERED` while keeping variance low and similar across groups.
+- Deduplicates participants by `UIN` across all statuses (priority: `CONFIRMED` > `CONTACTED` > `TO_CONTACT` > `REGISTERED`).
+- Aborts early if any participant UIN is found in blacklist CSVs (prints the offending rows and sources).
+- Writes the updated CSV with `Status=TO_CONTACT` and the configured group label in the `Group` column for new picks
 
 ## Notes
 
@@ -99,5 +115,5 @@ python3 variance_checker.py \
 
 ## Outputs
 
-- `*.updated.csv`: participants with new picks marked `TO_CONTACT` and assigned `Group` 1 or 2
+- `*.updated.csv`: participants with new picks marked `TO_CONTACT` and assigned to the configured group labels
 - Variance report: prints per-group proportions vs targets with overall variance (% MAD), plus a separate “Device OS” section (30% iOS / 70% Android)
