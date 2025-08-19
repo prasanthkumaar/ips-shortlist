@@ -22,3 +22,10 @@ SEED = 42
 # Optional: override the participants file used by variance checker.
 # If left None, it will use PARTICIPANTS_CSV with ".csv" replaced by ".updated.csv".
 VARIANCE_PARTICIPANTS_CSV = None 
+
+# Language eligibility
+# Only participants whose `Preferred language of communication` value is in this list are eligible for shortlisting.
+# The CSV currently only contains 'Chinese' and 'English' values; any other value will raise a validation error.
+SPEAKING_LANGUAGES_ELIGIBLE = [
+	"English",
+] 

@@ -54,6 +54,7 @@ def detect_columns(headers: List[str]) -> Dict[str, Optional[str]]:
         'phone': 'Number' if 'Number' in header_set else None,
         'os': 'OS' if 'OS' in header_set else None,
         'uin': 'UIN' if 'UIN' in header_set else None,
+        'preferred_language': 'Preferred language of communication' if 'Preferred language of communication' in header_set else None,
     }
     return mapping
 
@@ -295,42 +296,59 @@ def load_participants(csv_path: str) -> Tuple[List[Dict[str, Any]], Dict[str, Op
         headers = reader.fieldnames or []
     colmap = detect_columns(headers)
 
-    # Require UIN column to exist
+    # Require UIN and Status columns to exist
     if not colmap.get('uin'):
         raise ValueError("Missing required 'UIN' column in participants CSV.")
+    if not colmap.get('status'):
+        raise ValueError("Missing required 'Status' column in participants CSV.")
+    # Also require Name, Number, and Group columns to exist
+    if not colmap.get('name'):
+        raise ValueError("Missing required 'Name' column in participants CSV.")
+    if not colmap.get('phone'):
+        raise ValueError("Missing required 'Number' column in participants CSV.")
+    if not colmap.get('group'):
+        raise ValueError("Missing required 'Group' column in participants CSV.")
+    # Require Preferred language of communication column
+    if not colmap.get('preferred_language'):
+        raise ValueError("Missing required 'Preferred language of communication' column in participants CSV.")
 
-    # Validate all rows have non-empty UIN and deduplicate by UIN across all statuses
     uin_col = colmap['uin']
-    status_col = colmap.get('status')
+    status_col = colmap['status']
+    pref_lang_col = colmap['preferred_language']
 
-    # Higher value = higher priority to keep when duplicate UINs are present
-    status_priority = {
-        'CONFIRMED': 4,
-        'CONTACTED': 3,
-        'TO_CONTACT': 2,
-        'REGISTERED': 1,
-    }
+    # Validate all rows have non-empty UIN and Status; also enforce no duplicate UINs
+    seen_uins: Set[str] = set()
+    duplicate_uins: Set[str] = set()
+    missing_status_rows: List[int] = []
+    invalid_language_rows: List[int] = []
 
-    dedup_by_uin: Dict[str, Dict[str, Any]] = {}
     for idx, row in enumerate(rows, start=1):
         uin_val = (row.get(uin_col, '') or '').strip()
         if not uin_val:
             raise ValueError(f"Row {idx} is missing a UIN value. All rows must include a UIN.")
-        current_status = (row.get(status_col, '') or '').strip().upper() if status_col else ''
-        current_priority = status_priority.get(current_status, 0)
-
-        if uin_val not in dedup_by_uin:
-            dedup_by_uin[uin_val] = row
+        status_val = (row.get(status_col, '') or '').strip()
+        if not status_val:
+            missing_status_rows.append(idx)
+        if uin_val in seen_uins:
+            duplicate_uins.add(uin_val)
         else:
-            existing_row = dedup_by_uin[uin_val]
-            existing_status = (existing_row.get(status_col, '') or '').strip().upper() if status_col else ''
-            existing_priority = status_priority.get(existing_status, 0)
-            # Keep the row with higher status priority; if tie, keep the first seen
-            if current_priority > existing_priority:
-                dedup_by_uin[uin_val] = row
+            seen_uins.add(uin_val)
+        # Validate preferred language values
+        lang_val = (row.get(pref_lang_col, '') or '').strip()
+        if lang_val not in {'Chinese', 'English'}:
+            invalid_language_rows.append(idx)
 
-    deduped_rows = list(dedup_by_uin.values())
-    return deduped_rows, colmap
+    if duplicate_uins:
+        dup_list = ', '.join(sorted(duplicate_uins))
+        raise ValueError(f"Duplicate UINs found in participants CSV: {dup_list}")
+    if missing_status_rows:
+        indices = ', '.join(str(i) for i in missing_status_rows)
+        raise ValueError(f"Missing 'Status' for rows: {indices}. All participants must have a status (e.g., 'REGISTERED').")
+    if invalid_language_rows:
+        indices = ', '.join(str(i) for i in invalid_language_rows)
+        raise ValueError(f"Invalid 'Preferred language of communication' for rows: {indices}. Only 'Chinese' or 'English' are allowed.")
+
+    return rows, colmap
 
 
 def load_blacklisted_uins(blacklist_dir: str) -> Tuple[Dict[str, Set[str]], List[str]]:
@@ -395,6 +413,10 @@ def normalize_row(row: Dict[str, Any], colmap: Dict[str, Optional[str]], age_buc
     if not os_norm:
         return None
 
+    # Preferred language (already validated earlier)
+    pref_lang_val = row.get(colmap['preferred_language'], '') if colmap.get('preferred_language') else ''
+    pref_lang = (pref_lang_val or '').strip()
+
     # Keep original for writing back
     norm = dict(row)
     norm['__norm_sex'] = sex
@@ -403,6 +425,7 @@ def normalize_row(row: Dict[str, Any], colmap: Dict[str, Optional[str]], age_buc
     norm['__norm_age_group'] = age_group
     norm['__norm_status'] = status
     norm['__norm_os'] = os_norm
+    norm['__pref_lang'] = pref_lang
     return norm
 
 
@@ -434,6 +457,8 @@ def shortlist(
     eighteen_to_twentyfour_labels = {lbl for lbl in age_groups_order if ('18-19' in lbl or '20-24' in lbl)}
 
     rows, colmap = load_participants(participants_csv)
+    # Eligible speaking languages configured in config.py (default to English only)
+    eligible_languages = set(getattr(config, 'SPEAKING_LANGUAGES_ELIGIBLE', ['English']))
 
     # Blacklist pre-check: abort if any participant UIN is found in blacklist CSVs
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -445,18 +470,16 @@ def shortlist(
     else:
         print("No blacklist CSV files found in 'blacklist' folder.")
 
-    hits: List[str] = []
+    # Track blacklisted participants by UIN -> sources string
+    blacklisted_uin_sources: Dict[str, str] = {}
     uin_col = colmap['uin']
-    name_col = colmap.get('name') or 'Name'
     for r in rows:
         uin_val = (r.get(uin_col, '') or '').strip()
         if uin_val in blacklist_map:
-            name_val = (r.get(name_col, '') or '').strip()
             sources = ', '.join(sorted(blacklist_map[uin_val]))
-            hits.append(f"{name_val} {uin_val} blacklisted in {sources} file")
+            blacklisted_uin_sources[uin_val] = sources
 
-    if hits:
-        raise ValueError('Blacklisted participants found; aborting shortlist.\n' + '\n'.join(hits))
+    # Blacklist check is handled non-fatally: selection excludes blacklisted and output marks status accordingly.
 
     # Normalize rows and separate by status
     normalized_rows: List[Dict[str, Any]] = []
@@ -481,7 +504,10 @@ def shortlist(
             existing_counts[key] += 1
 
     # Eligible pool is REGISTERED and not yet pending/confirmed
-    eligible: List[Dict[str, Any]] = [r for r in normalized_rows if r['__norm_status'] == 'REGISTERED']
+    eligible: List[Dict[str, Any]] = [
+        r for r in normalized_rows
+        if r['__norm_status'] == 'REGISTERED' and (r.get(uin_col, '').strip() not in blacklisted_uin_sources) and r.get('__pref_lang') in eligible_languages
+    ]
 
     # Per-group top-up: compute current group sizes and remaining capacity
     group_header_in = colmap['group'] if colmap['group'] else 'Group'
@@ -649,9 +675,11 @@ def shortlist(
         if m:
             vals = list(m.values())
             balance = max(vals) - min(vals)
+            avg_dev = sum(vals) / len(vals)
         else:
             balance = 0.0
-        return total + BALANCE_LAMBDA * balance
+            avg_dev = 0.0
+        return avg_dev + BALANCE_LAMBDA * balance
 
     capacity_remaining = dict(group_capacity_remaining)
     random.shuffle(selected_rows)
@@ -755,6 +783,19 @@ def shortlist(
         writer.writeheader()
         for raw in reader:
             row_out = dict(raw)
+            # Blacklist handling: if REGISTERED and found in blacklist, mark as BLACKLISTED
+            uin_val_out = (raw.get(uin_col, '') or '').strip()
+            status_val_out = (raw.get(status_header, '') or '').strip().upper()
+            if uin_val_out in blacklisted_uin_sources and status_val_out == 'REGISTERED':
+                row_out[status_header] = f"BLACKLISTED: Found in {blacklisted_uin_sources[uin_val_out]}"
+                writer.writerow(row_out)
+                continue
+            # Preferred language ineligibility: if REGISTERED and not in eligible list, mark INELIGIBLE
+            pref_lang_out = (raw.get(colmap['preferred_language'], '') or '').strip() if colmap.get('preferred_language') else ''
+            if status_val_out == 'REGISTERED' and pref_lang_out not in eligible_languages:
+                row_out[status_header] = f'INELIGIBLE: [Preferred language of communication] is [{pref_lang_out}]'
+                writer.writerow(row_out)
+                continue
             # Normalize to check if this is a selected row
             norm = normalize_row(raw, colmap, age_bucket, eighteen_to_twentyfour_labels)
             if norm and norm['__norm_status'] == 'REGISTERED':
@@ -777,10 +818,8 @@ def main():
     # Also print a ready-to-run variance checker command (absolute paths)
     shortlist_dir = os.path.dirname(os.path.abspath(__file__))
     variance_path = os.path.join(shortlist_dir, 'variance_checker.py')
-    updated_abs = os.path.abspath(updated)
-    targets_abs = os.path.abspath(config.TARGETS_CSV)
     print('Run this to view variance per group:')
-    print(f'python3 {variance_path} --participants "{updated_abs}" --targets "{targets_abs}"')
+    print(f'python3 {variance_path}')
 
 
 if __name__ == '__main__':
