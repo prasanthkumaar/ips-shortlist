@@ -335,7 +335,7 @@ def load_participants(csv_path: str) -> Tuple[List[Dict[str, Any]], Dict[str, Op
             seen_uins.add(uin_val)
         # Validate preferred language values
         lang_val = (row.get(pref_lang_col, '') or '').strip()
-        if lang_val not in {'Chinese', 'English'}:
+        if lang_val not in {'Mandarin/Chinese', 'English'}:
             invalid_language_rows.append(idx)
 
     if duplicate_uins:
@@ -346,7 +346,7 @@ def load_participants(csv_path: str) -> Tuple[List[Dict[str, Any]], Dict[str, Op
         raise ValueError(f"Missing 'Status' for rows: {indices}. All participants must have a status (e.g., 'REGISTERED').")
     if invalid_language_rows:
         indices = ', '.join(str(i) for i in invalid_language_rows)
-        raise ValueError(f"Invalid 'Preferred language of communication' for rows: {indices}. Only 'Chinese' or 'English' are allowed.")
+        raise ValueError(f"Invalid 'Preferred language of communication' for rows: {indices}. Only 'Mandarin/Chinese' or 'English' are allowed.")
 
     return rows, colmap
 
@@ -445,11 +445,14 @@ def build_target_quota(target_counts: Dict[Tuple[str, str, str, str], int], tota
     return base
 
 
+# Modified shortlist function with selection reason tracking
+
 def shortlist(
     participants_csv: str,
     targets_csv: str,
     seed: int = DEFAULT_SEED,
 ) -> str:
+    
     random.seed(seed)
 
     age_groups_order, valid_keys, target_counts = load_targets(targets_csv)
@@ -479,13 +482,31 @@ def shortlist(
             sources = ', '.join(sorted(blacklist_map[uin_val]))
             blacklisted_uin_sources[uin_val] = sources
 
+    # Track selection reasons for each participant by UIN
+    selection_reasons: Dict[str, str] = {}
+
     # Blacklist check is handled non-fatally: selection excludes blacklisted and output marks status accordingly.
 
     # Normalize rows and separate by status
     normalized_rows: List[Dict[str, Any]] = []
     for row in rows:
+        uin_val = (row.get(uin_col, '') or '').strip()
         norm = normalize_row(row, colmap, age_bucket, eighteen_to_twentyfour_labels)
         if not norm:
+            # Track normalization failure reasons
+            status_val = (row.get(colmap['status'], '') or '').strip().upper()
+            if status_val == 'REGISTERED':
+                # Try to determine specific normalization failure reason
+                dob_raw = row.get(colmap['dob'], '') if colmap['dob'] else ''
+                dob = parse_date_maybe(dob_raw) if dob_raw else None
+                if not dob:
+                    selection_reasons[uin_val] = "Not selected - invalid/missing date of birth"
+                else:
+                    age = compute_age(dob)
+                    if age < 18:
+                        selection_reasons[uin_val] = f"Not selected - age {age} below 18"
+                    else:
+                        selection_reasons[uin_val] = "Not selected - normalization failed (invalid data)"
             continue
         normalized_rows.append(norm)
 
@@ -498,16 +519,38 @@ def shortlist(
     group_labels: List[str] = list(config.GROUP_LABELS)
     existing_by_group_os: Dict[str, List[str]] = {g: [] for g in group_labels}
     for r in confirmed_or_pending:
+        uin_val = (r.get(uin_col, '') or '').strip()
         key = (r['__norm_sex'], r['__norm_age_group'], r['__norm_race'], r['__norm_education_level'])
         # Only count toward 4D targets if key exists in targets
         if key in target_counts:
             existing_counts[key] += 1
+        # Track reason for already confirmed/pending participants
+        if r['__norm_status'] == 'CONFIRMED':
+            selection_reasons[uin_val] = "Already confirmed"
+        elif r['__norm_status'] == 'TO_CONTACT':
+            selection_reasons[uin_val] = "Already marked to contact"
+        elif r['__norm_status'] == 'CONTACTED':
+            selection_reasons[uin_val] = "Already contacted"
 
     # Eligible pool is REGISTERED and not yet pending/confirmed
-    eligible: List[Dict[str, Any]] = [
-        r for r in normalized_rows
-        if r['__norm_status'] == 'REGISTERED' and (r.get(uin_col, '').strip() not in blacklisted_uin_sources) and r.get('__pref_lang') in eligible_languages
-    ]
+    eligible: List[Dict[str, Any]] = []
+    for r in normalized_rows:
+        uin_val = (r.get(uin_col, '') or '').strip()
+        if r['__norm_status'] == 'REGISTERED':
+            # Check blacklist
+            if uin_val in blacklisted_uin_sources:
+                selection_reasons[uin_val] = f"Blacklisted - found in {blacklisted_uin_sources[uin_val]}"
+                continue
+            # Check language eligibility
+            if r.get('__pref_lang') not in eligible_languages:
+                lang_val = r.get('__pref_lang', 'unknown')
+                selection_reasons[uin_val] = f"Not selected - preferred language '{lang_val}' not eligible (only {', '.join(eligible_languages)} allowed)"
+                continue
+            # This participant is eligible for selection
+            eligible.append(r)
+        elif r['__norm_status'] not in {'CONFIRMED', 'TO_CONTACT', 'CONTACTED'}:
+            # Track other status values
+            selection_reasons[uin_val] = f"Not selected - status is '{r['__norm_status']}'"
 
     # Per-group top-up: compute current group sizes and remaining capacity
     group_header_in = colmap['group'] if colmap['group'] else 'Group'
@@ -577,6 +620,7 @@ def shortlist(
         random.shuffle(lst)
 
     selected_indices: List[int] = []
+    selected_in_first_pass: Set[int] = set()
 
     # First pass: fill deficits by key
     for key, deficit in sorted(new_quota.items(), key=lambda kv: kv[1], reverse=True):
@@ -584,7 +628,14 @@ def shortlist(
             continue
         pool = by_key_pool.get(key, [])
         take = min(deficit, len(pool))
-        selected_indices.extend(pool[:take])
+        for i in range(take):
+            idx = pool[i]
+            selected_indices.append(idx)
+            selected_in_first_pass.add(idx)
+            # Track reason for first pass selection
+            uin_val = (eligible[idx].get(uin_col, '') or '').strip()
+            sex, age, race, edu = key
+            selection_reasons[uin_val] = f"Selected (1st pass) - exact 4D deficit: {sex}/{age}/{race}/{edu} (deficit: {deficit})"
         by_key_pool[key] = pool[take:]
 
     # OS targets
@@ -614,33 +665,108 @@ def shortlist(
         selected_set = set(selected_indices)
         remaining_indices = [i for i in range(len(eligible)) if i not in selected_set]
 
-        def candidate_score(idx: int) -> float:
+        def candidate_score(idx: int) -> Tuple[float, str]:
             r = eligible[idx]
             key = (r['__norm_sex'], r['__norm_age_group'], r['__norm_race'], r['__norm_education_level'])
             # Score higher if key is still under desired_total_counts vs current_counts
             deficit_key = desired_total_counts.get(key, 0) - current_counts.get(key, 0)
             sex, age, race, edu = key
             s = 0.0
+            breakdown_parts = []
+            
+            # 4D cell deficit bonus
             if deficit_key > 0:
-                s += 3.0
-            s += target_marginals[0].get(sex, 0) * 1.0
-            s += target_marginals[1].get(age, 0) * 1.0
-            s += target_marginals[2].get(race, 0) * 0.5
-            s += target_marginals[3].get(edu, 0) * 0.5
+                s += config.CELL_DEFICIT_BONUS
+                breakdown_parts.append(f"4D-cell deficit bonus: +{config.CELL_DEFICIT_BONUS} (deficit: {deficit_key})")
+            else:
+                breakdown_parts.append(f"4D-cell deficit bonus: +0.0 (no deficit, current: {current_counts.get(key, 0)}, desired: {desired_total_counts.get(key, 0)})")
+            
+            # Special underrepresented race bonus
+            if hasattr(config, 'UNDERREPRESENTED_RACES') and race in config.UNDERREPRESENTED_RACES:
+                underrep_bonus = getattr(config, 'UNDERREPRESENTED_RACE_BONUS', 0.0)
+                s += underrep_bonus
+                breakdown_parts.append(f"Underrepresented race bonus ({race}): +{underrep_bonus}")
+            
+            # Marginal contributions
+            sex_contrib = target_marginals[0].get(sex, 0) * config.SEX_WEIGHT
+            age_contrib = target_marginals[1].get(age, 0) * config.AGE_WEIGHT
+            race_contrib = target_marginals[2].get(race, 0) * config.RACE_WEIGHT
+            edu_contrib = target_marginals[3].get(edu, 0) * config.EDUCATION_WEIGHT
+            
+            s += sex_contrib
+            s += age_contrib  
+            s += race_contrib
+            s += edu_contrib
+            
+            breakdown_parts.append(f"Sex ({sex}): +{sex_contrib:.3f}")
+            breakdown_parts.append(f"Age ({age}): +{age_contrib:.3f}")
+            breakdown_parts.append(f"Race ({race}): +{race_contrib:.3f}")
+            breakdown_parts.append(f"Education ({edu}): +{edu_contrib:.3f}")
+            
             # OS bias toward reaching 30/70 overall
+            os_contrib = 0.0
             if r['__norm_os'] == 'iOS':
                 ios_deficit = desired_total_ios_count - current_os_counts.get('iOS', 0)
-                s += 2.0 if ios_deficit > 0 else -1.0
+                if ios_deficit > 0:
+                    os_contrib = config.OS_BONUS
+                    breakdown_parts.append(f"OS (iOS): +{config.OS_BONUS} (need more iOS, deficit: {ios_deficit})")
+                else:
+                    os_contrib = config.OS_PENALTY
+                    breakdown_parts.append(f"OS (iOS): {config.OS_PENALTY} (enough iOS, deficit: {ios_deficit})")
             else:
                 desired_android = total_final_after_selection - desired_total_ios_count
                 android_deficit = desired_android - current_os_counts.get('Android', 0)
-                s += 2.0 if android_deficit > 0 else -1.0
-            s += random.random() * 0.01
-            return s
+                if android_deficit > 0:
+                    os_contrib = config.OS_BONUS
+                    breakdown_parts.append(f"OS (Android): +{config.OS_BONUS} (need more Android, deficit: {android_deficit})")
+                else:
+                    os_contrib = config.OS_PENALTY
+                    breakdown_parts.append(f"OS (Android): {config.OS_PENALTY} (enough Android, deficit: {android_deficit})")
+            
+            s += os_contrib
+            
+            # Random tie-breaker
+            random_contrib = random.random() * config.RANDOM_TIE_BREAKER_MAX
+            s += random_contrib
+            breakdown_parts.append(f"Random: +{random_contrib:.3f}")
+            
+            breakdown_str = " | ".join(breakdown_parts)
+            return s, breakdown_str
 
-        remaining_indices.sort(key=candidate_score, reverse=True)
+        # Score all remaining candidates and track their scores for reasons
+        scored_candidates_with_breakdown = [(idx, candidate_score(idx)) for idx in remaining_indices]
+        scored_candidates_with_breakdown.sort(key=lambda x: x[1][0], reverse=True)
+        
         need = total_new_needed - len(selected_indices)
-        selected_indices.extend(remaining_indices[:need])
+        second_pass_selected = [idx for idx, (score, breakdown) in scored_candidates_with_breakdown[:need]]
+        selected_indices.extend(second_pass_selected)
+        
+        # Track reasons for second pass with detailed breakdowns
+        for i, (idx, (score, breakdown)) in enumerate(scored_candidates_with_breakdown):
+            uin_val = (eligible[idx].get(uin_col, '') or '').strip()
+            if i < need:
+                r = eligible[idx]
+                key = (r['__norm_sex'], r['__norm_age_group'], r['__norm_race'], r['__norm_education_level'])
+                sex, age, race, edu = key
+                selection_reasons[uin_val] = f"Selected (2nd pass) - ranked {i+1}/{len(scored_candidates_with_breakdown)} (score: {score:.3f}) for {sex}/{age}/{race}/{edu}. Breakdown: {breakdown}"
+            else:
+                r = eligible[idx]
+                key = (r['__norm_sex'], r['__norm_age_group'], r['__norm_race'], r['__norm_education_level'])
+                sex, age, race, edu = key
+                selection_reasons[uin_val] = f"Not selected - ranked {i+1}/{len(scored_candidates_with_breakdown)} (score: {score:.3f}) for {sex}/{age}/{race}/{edu}, below cutoff. Breakdown: {breakdown}"
+
+    # Mark remaining eligible candidates as not selected
+    selected_set = set(selected_indices)
+    for i, r in enumerate(eligible):
+        if i not in selected_set:
+            uin_val = (r.get(uin_col, '') or '').strip()
+            if uin_val not in selection_reasons:  # Only if we haven't already set a reason
+                key = (r['__norm_sex'], r['__norm_age_group'], r['__norm_race'], r['__norm_education_level'])
+                sex, age, race, edu = key
+                if total_new_needed == 0:
+                    selection_reasons[uin_val] = f"Not selected - no capacity remaining (groups full)"
+                else:
+                    selection_reasons[uin_val] = f"Not selected - eligible but not chosen for {sex}/{age}/{race}/{edu}"
 
     # Ensure exactly total_new_needed
     selected_indices = selected_indices[:total_new_needed]
@@ -709,6 +835,11 @@ def shortlist(
         var_rows_by_group[best_g].append(r)
         r['__assigned_group'] = best_g
         capacity_remaining[best_g] = max(0, capacity_remaining[best_g] - 1)
+        
+        # Update selection reason with group assignment
+        uin_val = (r.get(uin_col, '') or '').strip()
+        if uin_val in selection_reasons:
+            selection_reasons[uin_val] += f" -> assigned to {best_g}"
 
     # Swap pass over new picks only
     def build_current_obj() -> float:
@@ -746,7 +877,7 @@ def shortlist(
     # Write updated CSV
     updated_path = participants_csv.replace('.csv', '.updated.csv')
 
-    # Ensure Group and Status columns exist in output header
+    # Ensure Group, Status, and Selection Reason columns exist in output header
     with open(participants_csv, 'r', newline='', encoding='utf-8') as f:
         reader = csv.DictReader(f)
         input_headers = reader.fieldnames or []
@@ -762,6 +893,11 @@ def shortlist(
         group_header = 'Group'
     else:
         group_header = colmap['group']
+    
+    # Add Selection Reason column
+    selection_reason_header = 'Selection Reason'
+    if selection_reason_header not in out_headers:
+        out_headers.append(selection_reason_header)
 
     # Build index mapping for writing
     selected_row_ids = set()
@@ -783,9 +919,14 @@ def shortlist(
         writer.writeheader()
         for raw in reader:
             row_out = dict(raw)
-            # Blacklist handling: if REGISTERED and found in blacklist, mark as BLACKLISTED
+            # Get UIN for reason lookup
             uin_val_out = (raw.get(uin_col, '') or '').strip()
             status_val_out = (raw.get(status_header, '') or '').strip().upper()
+            
+            # Set selection reason
+            row_out[selection_reason_header] = selection_reasons.get(uin_val_out, "Unknown")
+            
+            # Blacklist handling: if REGISTERED and found in blacklist, mark as BLACKLISTED
             if uin_val_out in blacklisted_uin_sources and status_val_out == 'REGISTERED':
                 row_out[status_header] = f"BLACKLISTED: Found in {blacklisted_uin_sources[uin_val_out]}"
                 writer.writerow(row_out)

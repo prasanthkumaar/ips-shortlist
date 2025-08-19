@@ -41,11 +41,11 @@ age_group,sex,race,education_level,count
 60-64,Male,Chinese,Post Secondary (Non-Tertiary),16028
 60-64,Male,Chinese,Diploma & Professional Qualification,13134
 60-64,Male,Chinese,University,23820
-65+,Male,Chinese,Below Secondary,117172
-65+,Male,Chinese,Secondary,57215
-65+,Male,Chinese,Post Secondary (Non-Tertiary),34685
-65+,Male,Chinese,Diploma & Professional Qualification,25346
-65+,Male,Chinese,University,32535
+65+,Male,Chinese,Below Secondary,126331
+65+,Male,Chinese,Secondary,61687
+65+,Male,Chinese,Post Secondary (Non-Tertiary),37396
+65+,Male,Chinese,Diploma & Professional Qualification,27328
+65+,Male,Chinese,University,35078
 18-19,Male,Malay,no_info,6961
 20-24,Male,Malay,no_info,20082
 25-29,Male,Malay,Below Secondary,593
@@ -88,11 +88,11 @@ age_group,sex,race,education_level,count
 60-64,Male,Malay,Post Secondary (Non-Tertiary),2804
 60-64,Male,Malay,Diploma & Professional Qualification,2298
 60-64,Male,Malay,University,4168
-65+,Male,Malay,Below Secondary,13787
-65+,Male,Malay,Secondary,6732
-65+,Male,Malay,Post Secondary (Non-Tertiary),4081
-65+,Male,Malay,Diploma & Professional Qualification,2983
-65+,Male,Malay,University,3828
+65+,Male,Malay,Below Secondary,14548
+65+,Male,Malay,Secondary,7104
+65+,Male,Malay,Post Secondary (Non-Tertiary),4306
+65+,Male,Malay,Diploma & Professional Qualification,3147
+65+,Male,Malay,University,4039
 18-19,Male,Indian,no_info,5107
 20-24,Male,Indian,no_info,12119
 25-29,Male,Indian,Below Secondary,292
@@ -135,11 +135,11 @@ age_group,sex,race,education_level,count
 60-64,Male,Indian,Post Secondary (Non-Tertiary),1741
 60-64,Male,Indian,Diploma & Professional Qualification,1426
 60-64,Male,Indian,University,2587
-65+,Male,Indian,Below Secondary,8793
-65+,Male,Indian,Secondary,4294
-65+,Male,Indian,Post Secondary (Non-Tertiary),2603
-65+,Male,Indian,Diploma & Professional Qualification,1902
-65+,Male,Indian,University,2441
+65+,Male,Indian,Below Secondary,9491
+65+,Male,Indian,Secondary,4634
+65+,Male,Indian,Post Secondary (Non-Tertiary),2809
+65+,Male,Indian,Diploma & Professional Qualification,2053
+65+,Male,Indian,University,2635
 18-19,Male,Others,no_info,1704
 20-24,Male,Others,no_info,4015
 25-29,Male,Others,Below Secondary,85
@@ -182,152 +182,152 @@ age_group,sex,race,education_level,count
 60-64,Male,Others,Post Secondary (Non-Tertiary),542
 60-64,Male,Others,Diploma & Professional Qualification,444
 60-64,Male,Others,University,806
-65+,Male,Others,Below Secondary,2367
-65+,Male,Others,Secondary,1156
-65+,Male,Others,Post Secondary (Non-Tertiary),701
-65+,Male,Others,Diploma & Professional Qualification,512
-65+,Male,Others,University,657
-18-19,Female,Chinese,no_info,13554
-20-24,Female,Chinese,no_info,39040
-25-29,Female,Chinese,Below Secondary,556
-25-29,Female,Chinese,Secondary,2146
-25-29,Female,Chinese,Post Secondary (Non-Tertiary),2424
-25-29,Female,Chinese,Diploma & Professional Qualification,10452
-25-29,Female,Chinese,University,29289
-30-34,Female,Chinese,Below Secondary,1304
-30-34,Female,Chinese,Secondary,2705
-30-34,Female,Chinese,Post Secondary (Non-Tertiary),2705
-30-34,Female,Chinese,Diploma & Professional Qualification,10202
-30-34,Female,Chinese,University,32757
-35-39,Female,Chinese,Below Secondary,1305
-35-39,Female,Chinese,Secondary,3602
-35-39,Female,Chinese,Post Secondary (Non-Tertiary),2193
-35-39,Female,Chinese,Diploma & Professional Qualification,8666
-35-39,Female,Chinese,University,27331
-40-44,Female,Chinese,Below Secondary,1902
-40-44,Female,Chinese,Secondary,3462
-40-44,Female,Chinese,Post Secondary (Non-Tertiary),2308
-40-44,Female,Chinese,Diploma & Professional Qualification,7907
-40-44,Female,Chinese,University,20494
-45-49,Female,Chinese,Below Secondary,2199
-45-49,Female,Chinese,Secondary,3930
-45-49,Female,Chinese,Post Secondary (Non-Tertiary),2289
-45-49,Female,Chinese,Diploma & Professional Qualification,7013
-45-49,Female,Chinese,University,13503
-50-54,Female,Chinese,Below Secondary,3869
-50-54,Female,Chinese,Secondary,5989
-50-54,Female,Chinese,Post Secondary (Non-Tertiary),3869
-50-54,Female,Chinese,Diploma & Professional Qualification,6125
-50-54,Female,Chinese,University,11667
-55-59,Female,Chinese,Below Secondary,8038
-55-59,Female,Chinese,Secondary,9315
-55-59,Female,Chinese,Post Secondary (Non-Tertiary),5409
-55-59,Female,Chinese,Diploma & Professional Qualification,5934
-55-59,Female,Chinese,University,9064
-60-64,Female,Chinese,Below Secondary,12816
-60-64,Female,Chinese,Secondary,10498
-60-64,Female,Chinese,Post Secondary (Non-Tertiary),5835
-60-64,Female,Chinese,Diploma & Professional Qualification,4790
-60-64,Female,Chinese,University,5886
-65+,Female,Chinese,Below Secondary,37912
-65+,Female,Chinese,Secondary,14686
-65+,Female,Chinese,Post Secondary (Non-Tertiary),7415
-65+,Female,Chinese,Diploma & Professional Qualification,3812
-65+,Female,Chinese,University,3893
-18-19,Female,Malay,no_info,10259
-20-24,Female,Malay,no_info,24063
-25-29,Female,Malay,Below Secondary,283
-25-29,Female,Malay,Secondary,1091
-25-29,Female,Malay,Post Secondary (Non-Tertiary),1233
-25-29,Female,Malay,Diploma & Professional Qualification,5314
-25-29,Female,Malay,University,14893
-30-34,Female,Malay,Below Secondary,664
-30-34,Female,Malay,Secondary,1377
-30-34,Female,Malay,Post Secondary (Non-Tertiary),1377
-30-34,Female,Malay,Diploma & Professional Qualification,5192
-30-34,Female,Malay,University,16672
-35-39,Female,Malay,Below Secondary,830
-35-39,Female,Malay,Secondary,2291
-35-39,Female,Malay,Post Secondary (Non-Tertiary),1394
-35-39,Female,Malay,Diploma & Professional Qualification,5511
-35-39,Female,Malay,University,17381
-40-44,Female,Malay,Below Secondary,1785
-40-44,Female,Malay,Secondary,3249
-40-44,Female,Malay,Post Secondary (Non-Tertiary),2166
-40-44,Female,Malay,Diploma & Professional Qualification,7421
-40-44,Female,Malay,University,19235
-45-49,Female,Malay,Below Secondary,2570
-45-49,Female,Malay,Secondary,4593
-45-49,Female,Malay,Post Secondary (Non-Tertiary),2676
-45-49,Female,Malay,Diploma & Professional Qualification,8196
-45-49,Female,Malay,University,15780
-50-54,Female,Malay,Below Secondary,3747
-50-54,Female,Malay,Secondary,5800
-50-54,Female,Malay,Post Secondary (Non-Tertiary),3748
-50-54,Female,Malay,Diploma & Professional Qualification,5932
-50-54,Female,Malay,University,11299
-55-59,Female,Malay,Below Secondary,5587
-55-59,Female,Malay,Secondary,6475
-55-59,Female,Malay,Post Secondary (Non-Tertiary),3759
-55-59,Female,Malay,Diploma & Professional Qualification,4125
-55-59,Female,Malay,University,6301
-60-64,Female,Malay,Below Secondary,7488
-60-64,Female,Malay,Secondary,6133
-60-64,Female,Malay,Post Secondary (Non-Tertiary),3409
-60-64,Female,Malay,Diploma & Professional Qualification,2799
-60-64,Female,Malay,University,3439
-65+,Female,Malay,Below Secondary,23556
-65+,Female,Malay,Secondary,9125
-65+,Female,Malay,Post Secondary (Non-Tertiary),4607
-65+,Female,Malay,Diploma & Professional Qualification,2369
-65+,Female,Malay,University,2418
-18-19,Female,Indian,no_info,3660
-20-24,Female,Indian,no_info,8221
-25-29,Female,Indian,Below Secondary,93
-25-29,Female,Indian,Secondary,357
-25-29,Female,Indian,Post Secondary (Non-Tertiary),404
-25-29,Female,Indian,Diploma & Professional Qualification,1740
-25-29,Female,Indian,University,4878
-30-34,Female,Indian,Below Secondary,249
-30-34,Female,Indian,Secondary,517
-30-34,Female,Indian,Post Secondary (Non-Tertiary),517
-30-34,Female,Indian,Diploma & Professional Qualification,1950
-30-34,Female,Indian,University,6260
-35-39,Female,Indian,Below Secondary,382
-35-39,Female,Indian,Secondary,1054
-35-39,Female,Indian,Post Secondary (Non-Tertiary),641
-35-39,Female,Indian,Diploma & Professional Qualification,2535
-35-39,Female,Indian,University,7995
-40-44,Female,Indian,Below Secondary,814
-40-44,Female,Indian,Secondary,1481
-40-44,Female,Indian,Post Secondary (Non-Tertiary),987
-40-44,Female,Indian,Diploma & Professional Qualification,3383
-40-44,Female,Indian,University,8768
-45-49,Female,Indian,Below Secondary,1190
-45-49,Female,Indian,Secondary,2126
-45-49,Female,Indian,Post Secondary (Non-Tertiary),1239
-45-49,Female,Indian,Diploma & Professional Qualification,3794
-45-49,Female,Indian,University,7306
-50-54,Female,Indian,Below Secondary,1784
-50-54,Female,Indian,Secondary,2762
-50-54,Female,Indian,Post Secondary (Non-Tertiary),1785
-50-54,Female,Indian,Diploma & Professional Qualification,2825
-50-54,Female,Indian,University,5381
-55-59,Female,Indian,Below Secondary,2260
-55-59,Female,Indian,Secondary,2619
-55-59,Female,Indian,Post Secondary (Non-Tertiary),1521
-55-59,Female,Indian,Diploma & Professional Qualification,1669
-55-59,Female,Indian,University,2549
-60-64,Female,Indian,Below Secondary,2296
-60-64,Female,Indian,Secondary,1881
-60-64,Female,Indian,Post Secondary (Non-Tertiary),1045
-60-64,Female,Indian,Diploma & Professional Qualification,858
-60-64,Female,Indian,University,1054
-65+,Female,Indian,Below Secondary,5474
-65+,Female,Indian,Secondary,2121
-65+,Female,Indian,Post Secondary (Non-Tertiary),1071
-65+,Female,Indian,Diploma & Professional Qualification,550
-65+,Female,Indian,University,562
+65+,Male,Others,Below Secondary,2527
+65+,Male,Others,Secondary,1234
+65+,Male,Others,Post Secondary (Non-Tertiary),748
+65+,Male,Others,Diploma & Professional Qualification,547
+65+,Male,Others,University,702
+18-19,Female,Chinese,no_info,27367
+20-24,Female,Chinese,no_info,75121
+25-29,Female,Chinese,Below Secondary,1206
+25-29,Female,Chinese,Secondary,4653
+25-29,Female,Chinese,Post Secondary (Non-Tertiary),5256
+25-29,Female,Chinese,Diploma & Professional Qualification,22662
+25-29,Female,Chinese,University,63506
+30-34,Female,Chinese,Below Secondary,3187
+30-34,Female,Chinese,Secondary,6612
+30-34,Female,Chinese,Post Secondary (Non-Tertiary),6612
+30-34,Female,Chinese,Diploma & Professional Qualification,24935
+30-34,Female,Chinese,University,80064
+35-39,Female,Chinese,Below Secondary,3664
+35-39,Female,Chinese,Secondary,10114
+35-39,Female,Chinese,Post Secondary (Non-Tertiary),6156
+35-39,Female,Chinese,Diploma & Professional Qualification,24332
+35-39,Female,Chinese,University,76733
+40-44,Female,Chinese,Below Secondary,6236
+40-44,Female,Chinese,Secondary,11352
+40-44,Female,Chinese,Post Secondary (Non-Tertiary),7568
+40-44,Female,Chinese,Diploma & Professional Qualification,25927
+40-44,Female,Chinese,University,67199
+45-49,Female,Chinese,Below Secondary,8963
+45-49,Female,Chinese,Secondary,16016
+45-49,Female,Chinese,Post Secondary (Non-Tertiary),9330
+45-49,Female,Chinese,Diploma & Professional Qualification,28578
+45-49,Female,Chinese,University,55027
+50-54,Female,Chinese,Below Secondary,14914
+50-54,Female,Chinese,Secondary,23083
+50-54,Female,Chinese,Post Secondary (Non-Tertiary),14914
+50-54,Female,Chinese,Diploma & Professional Qualification,23607
+50-54,Female,Chinese,University,44967
+55-59,Female,Chinese,Below Secondary,24107
+55-59,Female,Chinese,Secondary,27937
+55-59,Female,Chinese,Post Secondary (Non-Tertiary),16222
+55-59,Female,Chinese,Diploma & Professional Qualification,17799
+55-59,Female,Chinese,University,27186
+60-64,Female,Chinese,Below Secondary,36900
+60-64,Female,Chinese,Secondary,30225
+60-64,Female,Chinese,Post Secondary (Non-Tertiary),16800
+60-64,Female,Chinese,Diploma & Professional Qualification,13792
+60-64,Female,Chinese,University,16946
+65+,Female,Chinese,Below Secondary,188917
+65+,Female,Chinese,Secondary,73178
+65+,Female,Chinese,Post Secondary (Non-Tertiary),36950
+65+,Female,Chinese,Diploma & Professional Qualification,18996
+65+,Female,Chinese,University,19397
+18-19,Female,Malay,no_info,6593
+20-24,Female,Malay,no_info,18958
+25-29,Female,Malay,Below Secondary,270
+25-29,Female,Malay,Secondary,1042
+25-29,Female,Malay,Post Secondary (Non-Tertiary),1177
+25-29,Female,Malay,Diploma & Professional Qualification,5076
+25-29,Female,Malay,University,14224
+30-34,Female,Malay,Below Secondary,641
+30-34,Female,Malay,Secondary,1330
+30-34,Female,Malay,Post Secondary (Non-Tertiary),1330
+30-34,Female,Malay,Diploma & Professional Qualification,5016
+30-34,Female,Malay,University,16105
+35-39,Female,Malay,Below Secondary,648
+35-39,Female,Malay,Secondary,1789
+35-39,Female,Malay,Post Secondary (Non-Tertiary),1089
+35-39,Female,Malay,Diploma & Professional Qualification,4303
+35-39,Female,Malay,University,13572
+40-44,Female,Malay,Below Secondary,960
+40-44,Female,Malay,Secondary,1748
+40-44,Female,Malay,Post Secondary (Non-Tertiary),1165
+40-44,Female,Malay,Diploma & Professional Qualification,3993
+40-44,Female,Malay,University,10349
+45-49,Female,Malay,Below Secondary,1154
+45-49,Female,Malay,Secondary,2063
+45-49,Female,Malay,Post Secondary (Non-Tertiary),1202
+45-49,Female,Malay,Diploma & Professional Qualification,3681
+45-49,Female,Malay,University,7088
+50-54,Female,Malay,Below Secondary,2010
+50-54,Female,Malay,Secondary,3112
+50-54,Female,Malay,Post Secondary (Non-Tertiary),2010
+50-54,Female,Malay,Diploma & Professional Qualification,3182
+50-54,Female,Malay,University,6062
+55-59,Female,Malay,Below Secondary,4160
+55-59,Female,Malay,Secondary,4821
+55-59,Female,Malay,Post Secondary (Non-Tertiary),2800
+55-59,Female,Malay,Diploma & Professional Qualification,3072
+55-59,Female,Malay,University,4692
+60-64,Female,Malay,Below Secondary,6524
+60-64,Female,Malay,Secondary,5344
+60-64,Female,Malay,Post Secondary (Non-Tertiary),2970
+60-64,Female,Malay,Diploma & Professional Qualification,2438
+60-64,Female,Malay,University,2996
+65+,Female,Malay,Below Secondary,21899
+65+,Female,Malay,Secondary,8483
+65+,Female,Malay,Post Secondary (Non-Tertiary),4283
+65+,Female,Malay,Diploma & Professional Qualification,2202
+65+,Female,Malay,University,2249
+18-19,Female,Indian,no_info,5152
+20-24,Female,Indian,no_info,11944
+25-29,Female,Indian,Below Secondary,142
+25-29,Female,Indian,Secondary,548
+25-29,Female,Indian,Post Secondary (Non-Tertiary),618
+25-29,Female,Indian,Diploma & Professional Qualification,2667
+25-29,Female,Indian,University,7472
+30-34,Female,Indian,Below Secondary,340
+30-34,Female,Indian,Secondary,704
+30-34,Female,Indian,Post Secondary (Non-Tertiary),704
+30-34,Female,Indian,Diploma & Professional Qualification,2657
+30-34,Female,Indian,University,8531
+35-39,Female,Indian,Below Secondary,441
+35-39,Female,Indian,Secondary,1218
+35-39,Female,Indian,Post Secondary (Non-Tertiary),741
+35-39,Female,Indian,Diploma & Professional Qualification,2930
+35-39,Female,Indian,University,9241
+40-44,Female,Indian,Below Secondary,926
+40-44,Female,Indian,Secondary,1686
+40-44,Female,Indian,Post Secondary (Non-Tertiary),1124
+40-44,Female,Indian,Diploma & Professional Qualification,3851
+40-44,Female,Indian,University,9980
+45-49,Female,Indian,Below Secondary,1184
+45-49,Female,Indian,Secondary,2116
+45-49,Female,Indian,Post Secondary (Non-Tertiary),1233
+45-49,Female,Indian,Diploma & Professional Qualification,3775
+45-49,Female,Indian,University,7269
+50-54,Female,Indian,Below Secondary,1592
+50-54,Female,Indian,Secondary,2465
+50-54,Female,Indian,Post Secondary (Non-Tertiary),1593
+50-54,Female,Indian,Diploma & Professional Qualification,2521
+50-54,Female,Indian,University,4802
+55-59,Female,Indian,Below Secondary,2468
+55-59,Female,Indian,Secondary,2860
+55-59,Female,Indian,Post Secondary (Non-Tertiary),1661
+55-59,Female,Indian,Diploma & Professional Qualification,1822
+55-59,Female,Indian,University,2784
+60-64,Female,Indian,Below Secondary,3583
+60-64,Female,Indian,Secondary,2934
+60-64,Female,Indian,Post Secondary (Non-Tertiary),1631
+60-64,Female,Indian,Diploma & Professional Qualification,1339
+60-64,Female,Indian,University,1645
+65+,Female,Indian,Below Secondary,13505
+65+,Female,Indian,Secondary,5231
+65+,Female,Indian,Post Secondary (Non-Tertiary),2641
+65+,Female,Indian,Diploma & Professional Qualification,1358
+65+,Female,Indian,University,1387
 18-19,Female,Others,no_info,1956
 20-24,Female,Others,no_info,4206
 25-29,Female,Others,Below Secondary,52
@@ -370,8 +370,8 @@ age_group,sex,race,education_level,count
 60-64,Female,Others,Post Secondary (Non-Tertiary),491
 60-64,Female,Others,Diploma & Professional Qualification,404
 60-64,Female,Others,University,496
-65+,Female,Others,Below Secondary,2455
-65+,Female,Others,Secondary,951
-65+,Female,Others,Post Secondary (Non-Tertiary),480
-65+,Female,Others,Diploma & Professional Qualification,247
-65+,Female,Others,University,252
+65+,Female,Others,Below Secondary,2735
+65+,Female,Others,Secondary,1059
+65+,Female,Others,Post Secondary (Non-Tertiary),535
+65+,Female,Others,Diploma & Professional Qualification,275
+65+,Female,Others,University,281
